@@ -7,24 +7,24 @@
 // @grant        GM_download
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @require      https://code.jquery.com/jquery-3.7.1.slim.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/markdown.js/0.5.0/markdown.min.js
 // ==/UserScript==
 (function() {
     'use strict';
 
-    let shadowRoot = null;
     let chatModal = null
-    let assistantButton = null;
     let messageHistory = []
 
     function main() {
-        shadowRoot = createShadowRoot();
-        addStyling(shadowRoot);
-        addTypingStyle(shadowRoot)
-        assistantButton = createAssistantButton(shadowRoot)
-        messageHistory.push({role: "system", content: "You are a helpful assistant."})
+        let theShadowRoot = createShadowRoot();
+        addStyling(theShadowRoot);
+        addTypingStyle(theShadowRoot)
+        let assistantButton = createAssistantButton(theShadowRoot)
+        chatModal = createChatModal(theShadowRoot, assistantButton)
+
+        messageHistory.push({role: "system", content: "You are a helpful assistant with the ability to answer questions about the current page content."})
         messageHistory.push({role: "user", content: "This is the current page content: \n" + getPageContent()})
+
     }
 
     function createShadowRoot() {
@@ -173,17 +173,25 @@
     }
 
     // Function to create chat modal within shadow root
-    function createChatModal() {
+    function createChatModal(shadowRoot, chatOpenButton) {
         function showPanel(selection) {
             chatOverlay.classList.add('visible');
-            assistantButton.hide()
+            chatOpenButton.hide()
             let selectedText = selection?.toString()
             console.log("Selected text: " + selectedText)
-            if (!selectedText)
+            if (!selectedText) {
+                chatInput.focus();
                 return null
-
-            addAssistantMessage(`You have selected text. Would you like to discuss or ask questions about it?`,
-                explainContent(selectedText));
+            }
+            messageHistory.push({role: "user", content: `
+                I have the following selected text and I may ask questions or discuss it.
+                ----
+                ${selectedText}
+                ----
+                `})
+            
+            
+            addAssistantMessage(`You have selected text. Feel free to ask questions or discuss it.`);
 
             chatInput.focus();
         }
@@ -194,31 +202,15 @@
 
         function closePanel() {
             chatOverlay.classList.remove('visible');
-            assistantButton.show()
+            chatOpenButton.show()
         }
 
-        function explainContent(content) {
-            let contentToExplain = content
-            return (userInput) => {
-                if (isConfirmation(userInput)) {
-                    return `
-                   Use the following selected content to answer or debate:
 
-                   ----
-                   ${contentToExplain}
-                   ----
-                   `
-                }
-                return null
-            }
-        }
-
-        function addAssistantMessage(content, preProcessPromptFunction = (userInput) => null) {
+        function addAssistantMessage(content) {
             const contentMessage = document.createElement('div');
             contentMessage.className = 'chat-message assistant';
             contentMessage.innerHTML = markdown.toHTML(content);
             chatContent.appendChild(contentMessage);
-            currentPreProcessPromptFunction = preProcessPromptFunction
             messageHistory.push({role: "assistant", content: content})
         }
 
@@ -245,43 +237,41 @@
             let query = userMessage
 
             let newPrompt = currentPreProcessPromptFunction(userMessage);
-            currentPreProcessPromptFunction = (userInput) => null
             if (newPrompt)
                 query = newPrompt
 
             sendChatMessage(query)
         }
 
-        function sendChatMessage(msg) {
+        async function sendChatMessage(msg) {
             // Disable input while processing
             chatInput.disabled = true;
             sendBtn.disabled = true;
             const typingIndicator = createTypingIndicator();
             chatContent.appendChild(typingIndicator);
 
-            return sendQuery(msg)
-                .then(data => {
-                    addAssistantMessage(data.message.content)
-                })
-                .catch(error => {
+            try {
+                try {
+                    const data = await sendQuery(msg);
+                    addAssistantMessage(data.message.content);
+                } catch (error) {
                     console.error('Error:', error);
-                    addAssistantMessage(data.message.content)
-                })
-                .finally(() => {
-                    if (chatContent.contains(typingIndicator)) {
-                        chatContent.removeChild(typingIndicator);
-                    }
-                    scrollToBottom()
+                    addAssistantMessage(data.message.content);
+                }
+            } finally {
+                if (chatContent.contains(typingIndicator)) {
+                    chatContent.removeChild(typingIndicator);
+                }
+                scrollToBottom();
 
-                    // Re-enable input
-                    chatInput.disabled = false;
-                    sendBtn.disabled = false;
-                    chatInput.focus();
-                })
+                // Re-enable input
+                chatInput.disabled = false;
+                sendBtn.disabled = false;
+                chatInput.focus();
+            }
         }
-        // setup
         let chatOverlay = document.createElement('div');
-        chatOverlay.className = 'modal-overlay visible';
+        chatOverlay.className = 'modal-overlay';
 
         const modal = document.createElement('div');
         modal.className = 'summary-modal';
@@ -301,7 +291,7 @@
         chatInput.className = 'chat-input';
         chatInput.type = 'text';
         chatInput.placeholder = 'Ask a question about the page...';
-        ignoreKeyStrokesWhenInputHasFocus(chatInput)
+        ignoreKeyStrokesWhenInputHasFocus(shadowRoot, chatInput)
 
         const sendBtn = document.createElement('button');
         sendBtn.className = 'chat-send-btn';
@@ -325,19 +315,15 @@
         chatOverlay.appendChild(modal);
         shadowRoot.appendChild(chatOverlay);
 
-        // Focus on input
-        chatInput.focus();
-
-        // Hide the button when panel is shown
-        assistantButton.hide()
-
-        let currentPreProcessPromptFunction = (_userInput) => null
-        addAssistantMessage("Would you like an overview? (type yes if so)", (userInput) => {
-            if (isConfirmation(userInput)) {
-                return summarize()
+        let currentPreProcessPromptFunction = (userInput) => {
+            switch(userInput.toLowerCase().trim()) {
+                case "overview":
+                    return summarizePrompt()
+                default:
+                    return userInput
             }
-            return null
-        });
+        }
+        addAssistantMessage("Type 'overview' to get an overview of the page content.");
         return {
             showPanel: showPanel,
             closePanel: closePanel
@@ -346,14 +332,10 @@
 
 
     function openChat(selection) {
-        if (chatModal) {
-            chatModal.showPanel(selection);
-            return;
-        }
-        chatModal = createChatModal(selection)
+        chatModal.showPanel(selection)
     }
 
-    function summarize() {
+    function summarizePrompt() {
         return `
         Summarize the page content, focus on the main story. Structure the summary as follows:
         - Add a short introduction about the general subject of the page
@@ -365,7 +347,7 @@
         `;
     }
 
-    function sendQuery(query) {
+    async function sendQuery(query) {
         messageHistory.push({role: "user", content: query})
         console.log(messageHistory)
         let req = {
@@ -375,27 +357,26 @@
         }
 
         // Send the request
-        return fetch('http://localhost:11434/api/chat', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(req)
-        })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('Network response was not ok!! \n' + response.statusText);
-                }
-                return response.json()
-            })
+        const response = await fetch('http://localhost:11434/api/chat',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(req)
+            });
+        if (!response.ok) {
+            throw new Error('Failed to communicate with LLM!! \n' + response.statusText);
+        }
+        return await response.json();
     }
 
     function createAssistantButton(shadowRoot) {
         // Create the button
-        let assistantButton = document.createElement('assistantButton');
-        assistantButton.id = 'assistant-btn';
-        assistantButton.innerText = '✨';
-        assistantButton.title = 'Talk about page content';
+        let openBrain = document.createElement('button');
+        openBrain.id = 'assistant-btn';
+        openBrain.innerText = '✨';
+        openBrain.title = 'Talk about page content';
 
         // Add ESC key listener for closing panel
         document.addEventListener('keydown', (e) => {
@@ -411,7 +392,7 @@
         let yOffset = 0;
 
         // Drag event listeners
-        assistantButton.addEventListener('mousedown', dragStart);
+        openBrain.addEventListener('mousedown', dragStart);
         document.addEventListener('mousemove', drag);
         document.addEventListener('mouseup', dragEnd);
 
@@ -425,7 +406,7 @@
             currentX = initialX;
             currentY = initialY;
 
-            if (e.target === assistantButton) {
+            if (e.target === openBrain) {
                 dragStarted = true;
             }
         }
@@ -439,7 +420,7 @@
                 xOffset = currentX;
                 yOffset = currentY;
 
-                setTranslate(currentX, currentY, assistantButton);
+                setTranslate(currentX, currentY, openBrain);
             }
         }
 
@@ -461,15 +442,14 @@
         }
 
         function hide() {
-            assistantButton.classList.add('hidden');
+            openBrain.classList.add('hidden');
         }
 
         function show() {
-            assistantButton.classList.remove('hidden');
+            openBrain.classList.remove('hidden');
         }
 
-        // Append the assistantButton to the shadow root
-        shadowRoot.appendChild(assistantButton);
+        shadowRoot.appendChild(openBrain);
         return {
             hide: hide,
             show: show
@@ -510,12 +490,8 @@
     }
 
 
-    function isConfirmation(message) {
-        return ['yes', 'y', 'yeah', 'please'].includes(message.toLowerCase().trim())
-    }
-
     ///////////////////////
-    function ignoreKeyStrokesWhenInputHasFocus(inputElement) {
+    function ignoreKeyStrokesWhenInputHasFocus(shadowRoot, inputElement) {
         function stopPropagation(e) {
             // Check if the input is actually focused
             if (shadowRoot.activeElement !== inputElement) return
