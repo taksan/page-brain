@@ -21,9 +21,28 @@
     const defaultConfig = {
         "llm": null,
         "prompt": `You are a helpful assistant with the ability to answer questions about the current page content.`,
-        "chat_url": "http://localhost:11434/api/chat",
-        "models_url": "http://localhost:11434/api/tags"
-    }    
+        "chat_url": "http://localhost:11434/v1/chat/completions",
+        "models_url": "http://localhost:11434/v1/models"
+    }
+    const commonConfigs = {
+        "groq": {
+            "chat_url": "https://api.groq.com/v1/chat/completions",
+            "models_url": "https://api.groq.com/v1/models"
+        },
+        "ollama": {
+            "chat_url": "http://localhost:11434/v1/chat/completions",
+            "models_url": "http://localhost:11434/v1/models"
+        }
+    }
+    const availableTools = [
+        {
+            "function": {
+                "name": "get_assistant_configuration",
+                "description": "Get the current assistant configuration"
+            },
+            "type": "function"
+        }
+    ]
     async function main() {
         let config = await GM.getValue("config", defaultConfig)
         messageHistory = new ChatHistory(config)
@@ -72,7 +91,6 @@
             this.config = config
             this.chatOpenButton = chatOpenButton;
             this.createElements(shadowRoot);
-            this.setupEventListeners();
             this.currentPreProcessPromptFunction = this.defaultPreProcessPrompt;
             this.addAssistantMessage("Type '/overview' to get an overview of the page content or /help to see the commands");
         }
@@ -83,48 +101,218 @@
 
             this.modal = document.createElement('div');
             this.modal.className = 'chat-modal';
-
-            this.closeBtn = document.createElement('button');
-            this.closeBtn.className = 'close-button';
-            this.closeBtn.innerHTML = '×';
-
-            this.chatContent = document.createElement('div');
-            this.chatContent.className = 'chat-content';
-
-            this.inputArea = document.createElement('div');
-            this.inputArea.className = 'chat-input-area';
-
-            this.chatInput = document.createElement('input');
-            this.chatInput.className = 'chat-input';
-            this.chatInput.type = 'text';
-            this.chatInput.placeholder = 'Ask a question about the page...';
-
-            this.sendBtn = document.createElement('button');
-            this.sendBtn.className = 'chat-send-btn';
-            this.sendBtn.innerText = 'Send';
-
-            // Assemble the components
-            this.inputArea.appendChild(this.chatInput);
-            this.inputArea.appendChild(this.sendBtn);
-
-            this.modal.appendChild(this.closeBtn);
-            this.modal.appendChild(this.chatContent);
-            this.modal.appendChild(this.inputArea);
-
             this.chatOverlay.appendChild(this.modal);
             shadowRoot.appendChild(this.chatOverlay);
 
-            ignoreKeyStrokesWhenInputHasFocus(shadowRoot, this.chatInput);
+            this.modal.appendChild(createHeaderArea(this))
+            this.configPanel = createConfigPanel(this)
+            this.modal.appendChild(this.configPanel)
+            
+            this.chatContent = createChatMessageArea();
+            this.modal.appendChild(this.chatContent);
+
+            let {userInput, sendBtn, userInputArea} = createUserInputArea(this)
+            this.modal.appendChild(userInputArea);
+            this.userInput = userInput
+            this.sendBtn = sendBtn
+            this.userInputArea = userInputArea
+
+
+            function createChatMessageArea() {
+                let chatContent = document.createElement('div');
+                chatContent.className = 'chat-content';
+                return chatContent
+            }
+
+            function createUserInputArea(self) {
+                const userInputArea = document.createElement('div');
+                userInputArea.className = 'chat-input-area';
+
+                let userInput = document.createElement('input')
+                userInput.className = 'chat-input';
+                userInput.type = 'text';
+                userInput.placeholder = 'Ask a question about the page...';
+                userInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        self.sendMessage();
+                    }
+                });
+
+                let sendBtn = document.createElement('button');
+                sendBtn.className = 'chat-send-btn';
+                sendBtn.innerText = 'Send';
+                sendBtn.addEventListener('click', () => self.sendMessage());
+
+                userInputArea.appendChild(userInput);
+                userInputArea.appendChild(sendBtn);
+                ignoreKeyStrokesWhenInputHasFocus(shadowRoot, userInput);
+                
+                return {userInput, sendBtn, userInputArea}
+            }
+
+            function createHeaderArea(self) {
+                let headerArea = document.createElement('div');
+                headerArea.className = 'chat-header';
+                
+                let configBtn = document.createElement('button');
+                configBtn.className = 'config-button';
+                configBtn.innerHTML = '⚙️';
+                configBtn.title = 'Configure';
+                
+                let closeBtn = document.createElement('button');
+                closeBtn.className = 'close-button';
+                closeBtn.innerHTML = '×';
+                closeBtn.onclick = () => self.closePanel();
+                
+                headerArea.appendChild(configBtn);
+                headerArea.appendChild(closeBtn);
+                configBtn.addEventListener('click', () => self.showConfigPanel());
+                return headerArea
+            }
+
+            function createConfigPanel(self) {
+                // Create config panel
+                const configPanel = document.createElement('div');
+                configPanel.className = 'config-panel';
+                configPanel.style.display = 'none';
+                const configForm = document.createElement('form');
+                configForm.innerHTML = `
+                <h3>Configuration</h3>
+                <div class="config-field">
+                    <label>Prompt:</label>
+                    <textarea id="prompt-config">${self.config.prompt}</textarea>
+                </div>
+                <div class="config-field">
+                    <label>Chat URL:</label>
+                    <input type="text" id="chat-url-config" value="${self.config.chat_url}">
+                </div>
+                <div class="config-field">
+                    <label>Models URL:</label>
+                    <input type="text" id="models-url-config" value="${self.config.models_url}">
+                </div>
+                <div class="config-field">
+                    <label>Api Token:</label>
+                    <input type="password" id="api-token" value="${self.config.apiToken}">
+                </div>                
+                <div class="config-field">
+                    <label>Model:</label>
+                    <div class="model-selection">
+                        <select id="model-config"></select>
+                        <button type="button" class="refresh-models" title="Refresh models">🔄</button>
+                    </div>
+                    <div id="model-info" style="margin-top: 8px; font-size: 0.9em;"></div>
+                </div>                
+                <div class="config-buttons">
+                    <button type="button" class="config-save">Save</button>
+                    <button type="button" class="config-cancel">Cancel</button>
+                </div>
+            `;
+                configPanel.appendChild(configForm);
+                configForm.querySelectorAll('input').forEach(input => {
+                    ignoreKeyStrokesWhenInputHasFocus(shadowRoot, input)
+                })
+
+                const modelSelect = configForm.querySelector('#model-config');
+                modelSelect.addEventListener('change', (e) => {
+                    // const selectedOption = e.target.selectedOptions[0];
+                    // const modelInfo = selectedOption.dataset;
+                    // const modelInfoDiv = configForm.querySelector('#model-info');
+                    // if (modelInfo.contextWindow || modelInfo.ownedBy) {
+                    //     modelInfoDiv.innerHTML = `
+                    //         ${modelInfo.contextWindow ? `<div>Context Window: ${modelInfo.contextWindow}</div>` : ''}
+                    //         ${modelInfo.ownedBy ? `<div>Provider: ${modelInfo.ownedBy}</div>` : ''}
+                    //     `;
+                    // } else {
+                    //     modelInfoDiv.innerHTML = '';
+                    // }
+                });
+
+                const saveBtn = configPanel.querySelector('.config-save');
+                saveBtn.addEventListener('click', () => {
+                    const config = {
+                        prompt: configForm.querySelector('#prompt-config').value,
+                        chat_url: configForm.querySelector('#chat-url-config').value,
+                        models_url: configForm.querySelector('#models-url-config').value,
+                        apiToken: configForm.querySelector('#api-token').value,
+                        llm: configForm.querySelector('#model-config').value
+                    };
+                    self.saveConfig(config)
+                });
+                
+                const cancelBtn = configPanel.querySelector('.config-cancel');
+                cancelBtn.addEventListener('click', () => self.hideConfigPanel());
+    
+                const refreshBtn = configPanel.querySelector('.refresh-models');
+                refreshBtn.addEventListener('click', () => {
+                    const config = {
+                        prompt: configForm.querySelector('#prompt-config').value,
+                        chat_url: configForm.querySelector('#chat-url-config').value,
+                        models_url: configForm.querySelector('#models-url-config').value,
+                        apiToken: configForm.querySelector('#api-token').value,
+                        llm: configForm.querySelector('#model-config').value
+                    };
+                    self.refreshModels(config);
+                });
+
+                return configPanel
+            }
         }
 
-        setupEventListeners() {
-            this.closeBtn.onclick = () => this.closePanel();
-            this.sendBtn.addEventListener('click', () => this.sendMessage());
-            this.chatInput.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') {
-                    this.sendMessage();
+        async refreshModels(configParam) {
+            if (!configParam)
+                configParam = this.config
+            const modelSelect = this.configPanel.querySelector('#model-config');
+            modelSelect.innerHTML = '<option>Loading...</option>';
+            try {
+                const headers = {};
+                if (configParam.apiToken) {
+                    headers['Authorization'] = `Bearer ${configParam.apiToken}`;
                 }
-            });
+                const response = await fetch(configParam.models_url, {
+                    headers
+                });
+                const jsonResponse = await response.json();
+                let models = jsonResponse.data || []
+                modelSelect.innerHTML = '';
+                models.forEach(m => {
+                    const option = document.createElement('option');
+                    const modelName = m.id
+                    option.value = modelName;
+                    option.textContent = modelName;
+                    if (modelName === this.config.llm) {
+                        option.selected = true;
+                    }
+                    modelSelect.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Error fetching models:', error);
+                modelSelect.innerHTML = '<option>Error loading models</option>';
+            }
+        }
+
+        showConfigPanel() {
+            this.chatContent.style.display = 'none';
+            this.userInputArea.style.display = 'none';
+            this.configPanel.style.display = 'block';
+            this.refreshModels();
+        }
+
+        hideConfigPanel() {
+            this.configPanel.style.display = 'none';
+            this.chatContent.style.display = 'block';
+            this.userInputArea.style.display = 'flex';
+        }
+
+        async saveConfig(configParam) {
+            const newConfig = {
+                ...this.config,
+                ...configParam
+            };
+
+            this.config = newConfig;
+            await GM.setValue("config", newConfig);
+            this.hideConfigPanel();
+            this.addAssistantMessage("Configuration saved successfully!");
         }
 
         showPanel(selection) {
@@ -134,7 +322,7 @@
             console.log("Selected text: " + selectedText);
             
             if (!selectedText) {
-                this.chatInput.focus();
+                this.userInput.focus();
                 return null;
             }
             
@@ -146,7 +334,7 @@
                 `);
             
             this.addAssistantMessage(`You have selected text. Feel free to ask questions or discuss it.`);
-            this.chatInput.focus();
+            this.userInput.focus();
         }
 
         closePanel() {
@@ -161,7 +349,7 @@
         addAssistantMessage(content) {
             const contentMessage = document.createElement('div');
             contentMessage.className = 'chat-message assistant';
-            contentMessage.innerHTML = marked.parse(content);
+            contentMessage.innerHTML = marked.parse(content || '');
             this.chatContent.appendChild(contentMessage);
             this.messageHistory.aiMessage(content);
             this.scrollToBottom();
@@ -181,18 +369,18 @@
             if (content instanceof HTMLElement)
                 contentMessage.appendChild(content);
             else
-                contentMessage.innerHTML = marked.parse(content);
+                contentMessage.innerHTML = marked.parse(content || '');
             this.chatContent.appendChild(contentMessage);
             this.scrollToBottom();
         }
 
         async sendMessage() {
-            const userMessage = this.chatInput.value.trim();
+            const userMessage = this.userInput.value.trim();
             if (!userMessage) return;
 
 
             this.addUserMessage(userMessage);
-            this.chatInput.value = '';
+            this.userInput.value = '';
 
             if (!this.config.llm) {
                 this.config.llm = userMessage;                
@@ -210,35 +398,30 @@
         }
 
         async sendChatMessage(query) {
-            this.chatInput.disabled = true;
+            this.userInput.disabled = true;
             this.sendBtn.disabled = true;
             const typingIndicator = createTypingIndicator();
             this.chatContent.appendChild(typingIndicator);
 
             try {
                 messageHistory.userMessage(query)
-                const data = await sendQuery(this.config, messageHistory);
+                const response = await sendQuery(this.config, messageHistory);
 
+                console.log("response: " + JSON.stringify(response, null, 2))
+                let content = await handleToolCalls(response.choices[0].message)
+                this.addAssistantMessage(content);
 
-                let toolAnswer = handleToolCalls(data.message.tool_calls);
-                if (toolAnswer) {
-                    console.log("toolAnswer: " + toolAnswer);
-                    console.log(this.messageHistory.lastMessage());
-                    this.addAssistantMessage(toolAnswer);
-                } else {
-                    this.addAssistantMessage(data.message.content);
-                }
             } catch (error) {
                 console.error('Error:', error);
-                this.addAssistantMessage("An error occurred while processing your request.");
+                this.addAssistantMessage("An error occurred: " + error.message);
             } finally {
                 if (this.chatContent.contains(typingIndicator)) {
                     this.chatContent.removeChild(typingIndicator);
                 }
                 this.scrollToBottom();
-                this.chatInput.disabled = false;
+                this.userInput.disabled = false;
                 this.sendBtn.disabled = false;
-                this.chatInput.focus();
+                this.userInput.focus();
             }
         }
 
@@ -258,7 +441,10 @@
                 case "/reset":
                     GM.deleteValue("config")
                     this.config = defaultConfig
-                    initConfig(this.config, this)
+                    initConfig(this)
+                    return null
+                case '/reset_history':
+                    this.messageHistory.init()
                     return null
                 
                 default:
@@ -268,18 +454,10 @@
     }    
 
 
-    async function initConfig(config, chatModal) {
-        chatModal.addNoLLMMessage("There is no LLM selected. Choose one from the following (click on it): ")
-        await chooseModel(config, selectLLM, chatModal);
+    async function initConfig(chatModal) {
+        chatModal.showPanel()
+        chatModal.showConfigPanel()
     }
-
-    function selectLLM(config, model, chatModal) {
-        chatModal.addAssistantMessage("You selected selected the following LLM: " + model)
-        config.llm = model
-        GM.setValue("config", config)
-        messageHistory.init()
-    }
-
 
     function createShadowRoot() {
         const container = document.createElement('div');
@@ -297,6 +475,7 @@
     }
 
     function summarizePrompt() {
+        messageHistory.userMessage("This is the current page content: \n" + getPageContent())
         return `
         Summarize the page content, focus on the main story. Structure the summary as follows:
         - Add a short introduction about the general subject of the page
@@ -313,23 +492,35 @@
             "model": config.llm,
             "stream": false,
             "messages": messageHistory.getHistory(),
-            "tools": []
+            //"tools": availableTools
         }
-
-
-        // Send the request
+        let headers = {}
+        if (config.apiToken) {
+            headers['Authorization'] = `Bearer ${config.apiToken}`;
+        }
         const response = await fetch(`${config.chat_url}`,
             {
                 method: 'POST',
                 headers: {
+                    ...headers,
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify(req)
             });
-        if (!response.ok) {
-            throw new Error('Failed to communicate with LLM!! \n' + response.statusText);
+        if (response.ok) 
+            return await response.json();
+        
+        if (response.status === 401) 
+            throw new Error('Unauthorized, invalid API token')
+        
+        if (response.status === 403) 
+            throw new Error('Forbidden, check your API token')
+        
+        if (response.status >= 400 && response.status < 500) {
+            let errorMessage = await response.json()
+            throw new Error(errorMessage.error.message)
         }
-        return await response.json();
+        throw new Error('Failed to communicate with LLM!! \n' + response.statusText)
     }
 
     function createAssistantButton(shadowRoot) {
@@ -500,24 +691,6 @@
         });
     }
 
-    async function chooseModel(config, selectLLM, chatModal) {
-        try {
-            let response = await fetch(`${config.models_url}`).then(res => res.json());
-            let ul = document.createElement('ul');
-            ul.classList.add('llm-list');
-            response.models.forEach(m => {
-                let li = document.createElement('li');
-                li.innerHTML = m.model;
-                li.onclick = () => selectLLM(config, m.model, chatModal);
-                ul.appendChild(li);
-            });
-            chatModal.addNoLLMMessage(ul);
-        } catch (e) {
-            chatModal.addNoLLMMessage("Failed to fetch models: " + e);
-        }
-    }
-
-
     function createTypingIndicator() {
         const typingContainer = document.createElement('div');
         typingContainer.className = 'typing-indicator chat-message assistant';
@@ -575,6 +748,103 @@
                 height: 70vh;
                 display: flex;
                 flex-direction: column;
+                color: #000;
+            }
+
+            .chat-header {
+                display: flex;
+                justify-content: flex-end;
+                padding: 10px;
+                border-bottom: 1px solid #e0e0e0;
+            }
+
+            .config-button {
+                background: none;
+                border: 1px solid #666;
+                font-size: 12px;
+                cursor: pointer;
+                color: #666;
+                border-radius: 8px;
+                margin-right: 10px;
+            }
+
+            .config-button:hover {
+                color: #000;
+                background: aliceblue;
+            }
+
+            .config-panel {
+                padding: 20px;
+                display: none;
+            }
+
+            .config-field {
+                margin-bottom: 15px;
+            }
+
+            .config-field label {
+                display: block;
+                margin-bottom: 5px;
+                font-weight: bold;
+            }
+
+            .config-field input,
+            .config-field textarea,
+            .config-field select {
+                width: calc(100% - 20px);
+                padding: 8px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+            }
+
+            .model-selection {
+                display: flex;
+                gap: 10px;
+                align-items: center;
+            }
+
+            .model-selection select {
+                flex-grow: 1;
+            }
+
+            .refresh-models {
+                padding: 8px;
+                background: none;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                cursor: pointer;
+            }
+
+            .refresh-models:hover {
+                background-color: #f0f0f0;
+            }
+
+            .config-field textarea {
+                height: 100px;
+                resize: vertical;
+            }
+
+            .config-buttons {
+                display: flex;
+                justify-content: flex-end;
+                gap: 10px;
+            }
+
+            .config-buttons button {
+                padding: 8px 16px;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+            }
+
+            .config-save {
+                background-color: #007bff;
+                color: white;
+            }
+
+            .config-cancel {
+                background-color: #6c757d;
+                color: white;
             }
 
             .chat-content {
@@ -582,7 +852,6 @@
                 overflow-y: auto;
                 padding: 15px;
                 border-bottom: 1px solid #e0e0e0;
-                margin-top: 24px;
                 max-height: calc(70vh - 150px);
             }
 
@@ -618,6 +887,8 @@
                 border: 1px solid #ddd;
                 border-radius: 4px;
                 margin-right: 10px;
+                background-color: #fff;
+                color: #000;
             }
 
             .chat-send-btn {
@@ -647,15 +918,11 @@
             }
 
             .close-button {
-                position: absolute;
-                top: 10px;
-                right: 10px;
                 background: none;
                 border: 1px solid #666;
                 font-size: 12px;
                 cursor: pointer;
                 color: #666;
-                z-index: 1002;
                 border-radius: 8px;
             }
 
@@ -716,9 +983,17 @@
         shadowRoot.appendChild(style);
     }
 
-    function handleToolCalls(toolCalls) {
-        if (!toolCalls || toolCalls.length === 0)
-            return false
+
+    let toolFunctions = {
+        "get_assistant_configuration": function() {
+            return "The current configuration is: " + JSON.stringify(CHAT_MODAL.config, null, 2)
+        }
+    }
+
+    async function handleToolCalls(message) {
+        if (message.tool_calls) {
+            return JSON.stringify(message.tool_calls)
+        }
         // console.log("Tool calls: " + JSON.stringify(toolCalls))
         // for (let toolCall of toolCalls) {
         //     if (toolCall.function.name === "get_assistant_configuration") {
@@ -733,7 +1008,7 @@
         //         console.log(toolCall.function.arguments.keys())
         //     }
         // }
-        return false
+        return message.content
     }
 
 
