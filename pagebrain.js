@@ -22,7 +22,9 @@
         "llm": null,
         "prompt": `You are a helpful assistant with the ability to answer questions about the current page content.`,
         "chat_url": "http://localhost:11434/v1/chat/completions",
-        "models_url": "http://localhost:11434/v1/models"
+        "models_url": "http://localhost:11434/v1/models",
+        "research_mode": false,
+        "research_goal": null
     }
     const commonConfigs = {
         "groq": {
@@ -50,7 +52,7 @@
         let theShadowRoot = createShadowRoot();
         addStyling(theShadowRoot);
         addTypingStyle(theShadowRoot)
-        let assistantButton = createAssistantButton(theShadowRoot)
+        let assistantButton = new AssistantButton(theShadowRoot)
         CHAT_MODAL = new ChatModal(theShadowRoot, assistantButton, messageHistory, config)
         if (!config.llm) {
             initConfig(config, CHAT_MODAL)
@@ -92,7 +94,13 @@
             this.chatOpenButton = chatOpenButton;
             this.createElements(shadowRoot);
             this.currentPreProcessPromptFunction = this.defaultPreProcessPrompt;
+            this.researchMode = this.config.research_mode || false;
+            this.researchGoal = this.config.research_goal || null;
+            this.currentPageAnalyzed = false;
             this.addAssistantMessage("Type '/overview' to get an overview of the page content or /help to see the commands");
+            if (this.researchMode && this.researchGoal) {
+                this.addNoLLMMessage(`Research mode is active. Current goal: "${this.researchGoal}"`);
+            }
         }
 
         createElements(shadowRoot) {
@@ -111,7 +119,7 @@
             this.chatContent = createChatMessageArea();
             this.modal.appendChild(this.chatContent);
 
-            let {userInput, sendBtn, userInputArea} = createUserInputArea(this)
+            let {userInput, sendBtn, userInputArea} = createSendUserInput(this)
             this.modal.appendChild(userInputArea);
             this.userInput = userInput
             this.sendBtn = sendBtn
@@ -124,7 +132,7 @@
                 return chatContent
             }
 
-            function createUserInputArea(self) {
+            function createSendUserInput(self) {
                 const userInputArea = document.createElement('div');
                 userInputArea.className = 'chat-input-area';
 
@@ -315,25 +323,45 @@
             this.addAssistantMessage("Configuration saved successfully!");
         }
 
+        async saveResearchState() {
+            const updatedConfig = {
+                ...this.config,
+                research_mode: this.researchMode,
+                research_goal: this.researchGoal
+            };
+            this.config = updatedConfig;
+            await GM.setValue("config", updatedConfig);
+        }
+
         showPanel(selection) {
             this.chatOverlay.classList.add('visible');
             this.chatOpenButton.hide();
             let selectedText = selection?.toString();
             console.log("Selected text: " + selectedText);
             
+            if (this.researchMode && this.researchGoal && !this.currentPageAnalyzed) {
+                this.currentPageAnalyzed = true;
+                this.messageHistory.userMessage(`Based on my research goal: "${this.researchGoal}", what insights can I gain from this page?`);
+                this.addAssistantMessage("Analyzing the page content based on your research goal...");
+                this.sendChatMessage(`Based on my research goal: "${this.researchGoal}", what insights can I gain from this page content:\n${getPageContent()}`);
+                return;
+            }
+            
             if (!selectedText) {
                 this.userInput.focus();
                 return null;
             }
             
-            this.messageHistory.userMessage(`
-                I have the following selected text and I may ask questions or discuss it.
-                ----
-                ${selectedText}
-                ----
-                `);
-            
-            this.addAssistantMessage(`You have selected text. Feel free to ask questions or discuss it.`);
+            if (!this.researchMode) {
+                this.messageHistory.userMessage(`
+                    I have the following selected text and I may ask questions or discuss it.
+                    ----
+                    ${selectedText}
+                    ----
+                    `);
+                
+                this.addAssistantMessage(`You have selected text. Feel free to ask questions or discuss it.`);
+            }
             this.userInput.focus();
         }
 
@@ -377,7 +405,6 @@
         async sendMessage() {
             const userMessage = this.userInput.value.trim();
             if (!userMessage) return;
-
 
             this.addUserMessage(userMessage);
             this.userInput.value = '';
@@ -426,26 +453,69 @@
         }
 
         defaultPreProcessPrompt(userInput) {
-            switch(userInput.toLowerCase().trim()) {
+            const input = userInput.toLowerCase().trim();
+            
+            if (input.startsWith('/research ')) {
+                const goal = userInput.slice(10).trim();
+                if (!goal) {
+                    this.addNoLLMMessage("Please specify a research goal. Usage: /research <your research goal>");
+                    return null;
+                }
+                this.researchMode = true;
+                this.researchGoal = goal;
+                this.currentPageAnalyzed = false;
+                this.saveResearchState();
+                this.addNoLLMMessage(`Research mode activated. Goal: "${goal}"\nI will analyze each page you visit based on this research goal.`);
+                return null;
+            }
+            
+            switch(input) {
                 case '/help':
-                    this.addNoLLMMessage("commands: /help, /overview, /reset, /config");
-                    return null
+                    this.addNoLLMMessage("commands:\n- /help: Show this help message\n- /overview: Get page overview\n- /reset: Reset configuration\n- /config: Show current config\n- /research <goal>: Set research goal and activate research mode\n- /stop_research: Stop research mode\n- /reanalyze: Force reanalysis of current page in research mode");
+                    return null;
                     
                 case "/overview":
                     return summarizePrompt();
 
                 case "/config":
                     this.addNoLLMMessage("The current configuration is:\n ```json\n" + JSON.stringify(this.config, null, 2) + "\n```");
-                    return null
+                    return null;
 
                 case "/reset":
                     GM.deleteValue("config")
                     this.config = defaultConfig
+                    this.researchMode = false;
+                    this.researchGoal = null;
+                    this.currentPageAnalyzed = false;
                     initConfig(this)
-                    return null
+                    return null;
+                    
                 case '/reset_history':
                     this.messageHistory.init()
-                    return null
+                    return null;
+                    
+                case '/stop_research':
+                    if (!this.researchMode) {
+                        this.addNoLLMMessage("Research mode is not active.");
+                        return null;
+                    }
+                    this.researchMode = false;
+                    this.researchGoal = null;
+                    this.currentPageAnalyzed = false;
+                    this.saveResearchState();
+                    this.addNoLLMMessage("Research mode deactivated.");
+                    return null;
+                    
+                case '/reanalyze':
+                    if (!this.researchMode) {
+                        this.addNoLLMMessage("Research mode is not active.");
+                        return null;
+                    }
+                    this.currentPageAnalyzed = false;
+                    this.messageHistory.userMessage(`Based on my research goal: "${this.researchGoal}", what insights can I gain from this page?`);
+                    this.addAssistantMessage("Re-analyzing the page content based on your research goal...");
+                    this.sendChatMessage(`Based on my research goal: "${this.researchGoal}", what insights can I gain from this page content:\n${getPageContent()}`);
+                    return null;
                 
                 default:
                     return userInput;
@@ -472,6 +542,99 @@
 
     function openChat(selection) {
         CHAT_MODAL.showPanel(selection)
+    }
+
+    class AssistantButton {
+        constructor(shadowRoot) {
+            this.shadowRoot = shadowRoot;
+            this.button = document.createElement('button');
+            this.button.id = 'assistant-btn';
+            this.button.innerText = '✨';
+            this.button.title = 'Talk about page content';
+
+            // Drag functionality variables
+            this.dragStarted = false;
+            this.currentX = 0;
+            this.currentY = 0;
+            this.initialX = 0;
+            this.initialY = 0;
+            this.xOffset = 0;
+            this.yOffset = 0;
+            this.currentSelection = null;
+
+            // Bind methods to maintain correct 'this' context
+            this.dragStart = this.dragStart.bind(this);
+            this.drag = this.drag.bind(this);
+            this.dragEnd = this.dragEnd.bind(this);
+            this.handleEscape = this.handleEscape.bind(this);
+
+            // Add event listeners
+            this.button.addEventListener('mousedown', this.dragStart);
+            document.addEventListener('mousemove', this.drag);
+            document.addEventListener('mouseup', this.dragEnd);
+            document.addEventListener('keydown', this.handleEscape);
+
+            this.shadowRoot.appendChild(this.button);
+        }
+
+        handleEscape(e) {
+            if (e.key === 'Escape') {
+                CHAT_MODAL?.closePanel();
+            }
+        }
+
+        dragStart(e) {
+            if (window.getSelection().rangeCount > 0) {
+                this.currentSelection = window.getSelection().getRangeAt(0).cloneRange();
+            }
+
+            this.initialX = e.clientX - this.xOffset;
+            this.initialY = e.clientY - this.yOffset;
+            this.currentX = this.initialX;
+            this.currentY = this.initialY;
+
+            if (e.target === this.button) {
+                this.dragStarted = true;
+            }
+        }
+
+        drag(e) {
+            if (this.dragStarted) {
+                e.preventDefault();
+                this.currentX = e.clientX - this.initialX;
+                this.currentY = e.clientY - this.initialY;
+
+                this.xOffset = this.currentX;
+                this.yOffset = this.currentY;
+
+                this.setTranslate(this.currentX, this.currentY, this.button);
+            }
+        }
+
+        setTranslate(xPos, yPos, el) {
+            el.style.transform = `translate3d(${xPos}px, ${yPos}px, 0)`;
+        }
+
+        dragEnd() {
+            if (this.dragStarted) {
+                this.dragStarted = false;
+                if (Math.abs(this.currentX - this.initialX) < 5 && Math.abs(this.currentY - this.initialY) < 5) {
+                    openChat(this.currentSelection);
+                    return;
+                }
+
+                this.initialX = this.currentX;
+                this.initialY = this.currentY;
+            }
+        }
+
+        hide() {
+            this.button.classList.add('hidden');
+        }
+
+        show() {
+            this.button.classList.remove('hidden');
+        }
     }
 
     function summarizePrompt() {
@@ -521,90 +684,6 @@
             throw new Error(errorMessage.error.message)
         }
         throw new Error('Failed to communicate with LLM!! \n' + response.statusText)
-    }
-
-    function createAssistantButton(shadowRoot) {
-        let openBrain = document.createElement('button');
-        openBrain.id = 'assistant-btn';
-        openBrain.innerText = '✨';
-        openBrain.title = 'Talk about page content';
-
-        // Add ESC key listener for closing panel
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                CHAT_MODAL?.closePanel()
-            }
-        });
-
-        // Drag functionality variables
-        let dragStarted = false;
-        let currentX, currentY, initialX, initialY;
-        let xOffset = 0;
-        let yOffset = 0;
-
-        // Drag event listeners
-        openBrain.addEventListener('mousedown', dragStart);
-        document.addEventListener('mousemove', drag);
-        document.addEventListener('mouseup', dragEnd);
-
-        let currentSelection = null
-        function dragStart(e) {
-            if (window.getSelection().rangeCount > 0)
-                currentSelection = window.getSelection().getRangeAt(0).cloneRange()
-
-            initialX = e.clientX - xOffset;
-            initialY = e.clientY - yOffset;
-            currentX = initialX;
-            currentY = initialY;
-
-            if (e.target === openBrain) {
-                dragStarted = true;
-            }
-        }
-
-        function drag(e) {
-            if (dragStarted) {
-                e.preventDefault();
-                currentX = e.clientX - initialX;
-                currentY = e.clientY - initialY;
-
-                xOffset = currentX;
-                yOffset = currentY;
-
-                setTranslate(currentX, currentY, openBrain);
-            }
-        }
-
-        function setTranslate(xPos, yPos, el) {
-            el.style.transform = `translate3d(${xPos}px, ${yPos}px, 0)`;
-        }
-
-        function dragEnd() {
-            if (dragStarted) {
-                dragStarted = false;
-                if (Math.abs(currentX - initialX) < 5 && Math.abs(currentY - initialY) < 5) {
-                    openChat(currentSelection);
-                    return;
-                }
-
-                initialX = currentX;
-                initialY = currentY;
-            }
-        }
-
-        function hide() {
-            openBrain.classList.add('hidden');
-        }
-
-        function show() {
-            openBrain.classList.remove('hidden');
-        }
-
-        shadowRoot.appendChild(openBrain);
-        return {
-            hide: hide,
-            show: show
-        }
     }
 
     function getPageContent() {
