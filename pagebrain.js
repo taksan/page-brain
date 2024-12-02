@@ -94,12 +94,90 @@
             this.chatOpenButton = chatOpenButton;
             this.createElements(shadowRoot);
             this.currentPreProcessPromptFunction = this.defaultPreProcessPrompt;
-            this.researchMode = this.config.research_mode || false;
             this.researchGoal = this.config.research_goal || null;
             this.currentPageAnalyzed = false;
-            this.addAssistantMessage("Type '/overview' to get an overview of the page content or /help to see the commands");
-            if (this.researchMode && this.researchGoal) {
-                this.addNoLLMMessage(`Research mode is active. Current goal: "${this.researchGoal}"`);
+            this.researchNotes = [];
+            this.pendingInsights = null;
+            this.researchButton = new ResearchButton(shadowRoot, this);
+            this.loadResearchNotes();
+            
+            if (this.researchGoal) {
+                this.researchButton.show();
+            } else {
+                this.addAssistantMessage("Type '/overview' to get an overview of the page content or /help to see the commands");
+            }
+        }
+
+        async loadResearchNotes() {
+            this.researchNotes = await GM.getValue("research_notes", []);
+        }
+
+        async saveResearchNotes() {
+            await GM.setValue("research_notes", this.researchNotes);
+        }
+
+        async addResearchNote(content) {
+            const currentUrl = window.location.href;
+            const prompt = `You must respond ONLY with a JSON object in the following format, with NO additional text before or after:
+{
+    "summary": "a very brief summary of the page (max 50 words)",
+    "isRelevant": true or false (boolean value, no quotes)
+}
+
+Analyze the following insights about a webpage in relation to the research goal: "${this.researchGoal}"
+
+Insights to analyze:
+${content}`;
+
+            try {
+                this.messageHistory.userMessage(prompt);
+                const response = await sendQuery(this.config, this.messageHistory);
+                const aiMessage = response.choices[0].message.content.trim();
+                
+                // Try to extract JSON if it's wrapped in other text
+                let jsonStr = aiMessage;
+                const jsonMatch = aiMessage.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                    jsonStr = jsonMatch[0];
+                }
+                
+                let analysis;
+                try {
+                    analysis = JSON.parse(jsonStr);
+                    
+                    // Validate the required fields
+                    if (typeof analysis.summary !== 'string' || typeof analysis.isRelevant !== 'boolean') {
+                        throw new Error('Invalid JSON structure');
+                    }
+                } catch (jsonError) {
+                    console.error('Invalid JSON response:', aiMessage);
+                    throw new Error('Failed to parse AI response as JSON');
+                }
+
+                const note = {
+                    url: currentUrl,
+                    summary: analysis.summary,
+                    insights: content,
+                    isRelevant: analysis.isRelevant,
+                    timestamp: new Date().toISOString()
+                };
+
+                this.researchNotes.push(note);
+                await this.saveResearchNotes();
+
+                // Add a message about the page's relevance
+                const relevanceMsg = analysis.isRelevant 
+                    ? "✅ This page has been added to your research notes."
+                    : "❌ This page was analyzed but deemed not relevant to your research goal.";
+                this.addNoAiMessage(relevanceMsg);
+            } catch (error) {
+                console.error('Error processing research note:', error);
+                console.error('AI response:', error.aiResponse);
+                this.addNoAiMessage(
+                    "⚠️ Error processing research note. The page was analyzed but couldn't be added to research notes." +
+                    "Check the console for more insights.");
+                // Reset the currentPageAnalyzed flag so user can try again
+                this.currentPageAnalyzed = false;
             }
         }
 
@@ -124,6 +202,7 @@
             this.userInput = userInput
             this.sendBtn = sendBtn
             this.userInputArea = userInputArea
+            this.researchModeAlertPrinted = false
 
 
             function createChatMessageArea() {
@@ -183,39 +262,86 @@
                 const configPanel = document.createElement('div');
                 configPanel.className = 'config-panel';
                 configPanel.style.display = 'none';
+
+                // Create tab buttons
+                const tabButtons = document.createElement('div');
+                tabButtons.className = 'config-tabs';
+                const settingsTab = document.createElement('button');
+                settingsTab.textContent = 'LLM Settings';
+                settingsTab.className = 'tab-button active';
+                const researchTab = document.createElement('button');
+                researchTab.textContent = 'Research';
+                researchTab.className = 'tab-button';
+                tabButtons.appendChild(settingsTab);
+                tabButtons.appendChild(researchTab);
+                configPanel.appendChild(tabButtons);
+
+                // Create settings form
                 const configForm = document.createElement('form');
+                configForm.className = 'tab-content settings-tab active';
                 configForm.innerHTML = `
-                <h3>Configuration</h3>
-                <div class="config-field">
-                    <label>Prompt:</label>
-                    <textarea id="prompt-config">${self.config.prompt}</textarea>
-                </div>
-                <div class="config-field">
-                    <label>Chat URL:</label>
-                    <input type="text" id="chat-url-config" value="${self.config.chat_url}">
-                </div>
-                <div class="config-field">
-                    <label>Models URL:</label>
-                    <input type="text" id="models-url-config" value="${self.config.models_url}">
-                </div>
-                <div class="config-field">
-                    <label>Api Token:</label>
-                    <input type="password" id="api-token" value="${self.config.apiToken}">
-                </div>                
-                <div class="config-field">
-                    <label>Model:</label>
-                    <div class="model-selection">
-                        <select id="model-config"></select>
-                        <button type="button" class="refresh-models" title="Refresh models">🔄</button>
+                    <div class="config-field">
+                        <label>System Prompt:</label>
+                        <textarea id="prompt-config">${self.config.prompt}</textarea>
                     </div>
-                    <div id="model-info" style="margin-top: 8px; font-size: 0.9em;"></div>
-                </div>                
-                <div class="config-buttons">
-                    <button type="button" class="config-save">Save</button>
-                    <button type="button" class="config-cancel">Cancel</button>
-                </div>
-            `;
+                    <div class="config-field">
+                        <label>Chat URL:</label>
+                        <input type="text" id="chat-url-config" value="${self.config.chat_url}">
+                    </div>
+                    <div class="config-field">
+                        <label>Models URL:</label>
+                        <input type="text" id="models-url-config" value="${self.config.models_url}">
+                    </div>
+                    <div class="config-field">
+                        <label>Api Token:</label>
+                        <input type="password" id="api-token" value="${self.config.apiToken}">
+                    </div>                
+                    <div class="config-field">
+                        <label>Model:</label>
+                        <div class="model-selection">
+                            <select id="model-config"></select>
+                            <button type="button" class="refresh-models" title="Refresh models">🔄</button>
+                        </div>
+                        <div id="model-info" style="margin-top: 8px; font-size: 0.9em;"></div>
+                    </div>                
+                    <div class="config-buttons">
+                        <button type="button" class="config-save">Save</button>
+                        <button type="button" class="config-cancel">Cancel</button>
+                    </div>
+                `;
+
+                // Create research form
+                const researchForm = document.createElement('form');
+                researchForm.className = 'tab-content research-tab';
+                researchForm.innerHTML = `
+                    <div class="config-field">
+                        <label>Research Goal:</label>
+                        <textarea id="research-goal">${self.config.research_goal || ''}</textarea>
+                    </div>
+                    <div class="config-buttons">
+                        <button type="button" class="research-save">Save</button>
+                        <button type="button" class="research-cancel">Cancel</button>
+                    </div>
+                `;
+
                 configPanel.appendChild(configForm);
+                configPanel.appendChild(researchForm);
+
+                // Tab switching logic
+                settingsTab.addEventListener('click', () => {
+                    settingsTab.classList.add('active');
+                    researchTab.classList.remove('active');
+                    configForm.classList.add('active');
+                    researchForm.classList.remove('active');
+                });
+
+                researchTab.addEventListener('click', () => {
+                    researchTab.classList.add('active');
+                    settingsTab.classList.remove('active');
+                    researchForm.classList.add('active');
+                    configForm.classList.remove('active');
+                });
+
                 configForm.querySelectorAll('input').forEach(input => {
                     ignoreKeyStrokesWhenInputHasFocus(shadowRoot, input)
                 })
@@ -235,7 +361,7 @@
                     // }
                 });
 
-                const saveBtn = configPanel.querySelector('.config-save');
+                const saveBtn = configForm.querySelector('.config-save');
                 saveBtn.addEventListener('click', () => {
                     const config = {
                         prompt: configForm.querySelector('#prompt-config').value,
@@ -244,13 +370,13 @@
                         apiToken: configForm.querySelector('#api-token').value,
                         llm: configForm.querySelector('#model-config').value
                     };
-                    self.saveConfig(config)
+                    self.saveConfig(config);
                 });
                 
-                const cancelBtn = configPanel.querySelector('.config-cancel');
+                const cancelBtn = configForm.querySelector('.config-cancel');
                 cancelBtn.addEventListener('click', () => self.hideConfigPanel());
-    
-                const refreshBtn = configPanel.querySelector('.refresh-models');
+                
+                const refreshBtn = configForm.querySelector('.refresh-models');
                 refreshBtn.addEventListener('click', () => {
                     const config = {
                         prompt: configForm.querySelector('#prompt-config').value,
@@ -262,7 +388,211 @@
                     self.refreshModels(config);
                 });
 
-                return configPanel
+                const researchSaveBtn = researchForm.querySelector('.research-save');
+                researchSaveBtn.addEventListener('click', () => {
+                    self.researchGoal = researchForm.querySelector('#research-goal').value;
+                    self.saveResearchState();
+                    if (self.researchGoal) {
+                        self.researchButton.show();
+                    } else {
+                        self.researchButton.hide();
+                    }
+                    self.hideConfigPanel();
+                });
+
+                const researchCancelBtn = researchForm.querySelector('.research-cancel');
+                researchCancelBtn.addEventListener('click', () => self.hideConfigPanel());
+
+                return configPanel;
+            }
+        }
+
+        showConfigPanel() {
+            this.chatContent.style.display = 'none';
+            this.userInputArea.style.display = 'none';
+            this.configPanel.style.display = 'block';
+            this.refreshModels();
+        }
+
+        hideConfigPanel() {
+            this.configPanel.style.display = 'none';
+            this.chatContent.style.display = 'block';
+            this.userInputArea.style.display = 'flex';
+        }
+
+        async saveConfig(configParam) {
+            const newConfig = {
+                ...this.config,
+                ...configParam
+            };
+
+            this.config = newConfig;
+            await GM.setValue("config", newConfig);
+            this.hideConfigPanel();
+            this.addAssistantMessage("Configuration saved successfully!");
+        }
+
+        async saveResearchState() {
+            const updatedConfig = {
+                ...this.config,
+                research_goal: this.researchGoal
+            };
+            this.config = updatedConfig;
+            await GM.setValue("config", updatedConfig);
+        }
+
+        showPanel(selection) {
+            this.chatOverlay.classList.add('visible');
+            this.chatOpenButton.hide();
+            this.researchButton.hide();
+            
+            // If we have pending insights from research button, process them
+            if (this.pendingInsights) {
+                this.messageHistory.userMessage(`Based on my research goal: "${this.researchGoal}", what insights can I gain from this page?`);
+                this.addAssistantMessage("These are the insights I have gathered about this page based on my research goal: " + this.researchGoal);
+                this.addAssistantMessage(this.pendingInsights);
+                this.addResearchNote(this.pendingInsights);
+                this.pendingInsights = null;
+                this.currentPageAnalyzed = true;
+                return;
+            }
+            
+            let selectedText = selection?.toString();
+            console.log("Selected text: " + selectedText);
+            
+            if (!selectedText) {
+                if (this.researchGoal && !this.currentPageAnalyzed && !this.researchModeAlertPrinted) {
+                    this.addNoAiMessage(`Research mode is active. Current goal: "${this.researchGoal}"\nTo analyze this page:\n1. Click the research button 🔍, or\n2. Type "/research-now"`);
+                    this.researchModeAlertPrinted = true;
+                }
+                this.userInput.focus();
+                return null;
+            }
+            
+            if (!this.researchGoal || this.currentPageAnalyzed) {
+                this.messageHistory.userMessage(`
+                    I have the following selected text and I may ask questions or discuss it.
+                    ----
+                    ${selectedText}
+                    ----
+                    `);
+                
+                this.addAssistantMessage(`You have selected text. Feel free to ask questions or discuss it.`);
+            }
+            this.userInput.focus();
+        }
+
+        closePanel() {
+            this.chatOverlay.classList.remove('visible');
+            this.chatOpenButton.show();
+            if (this.researchGoal) {
+                this.researchButton.show();
+            }
+        }
+
+        scrollToBottom() {
+            this.chatContent.scrollTop = this.chatContent.scrollHeight;
+        }
+
+        addAssistantMessage(content) {
+            const contentMessage = document.createElement('div');
+            contentMessage.className = 'chat-message assistant';
+            contentMessage.innerHTML = marked.parse(content || '');
+            this.chatContent.appendChild(contentMessage);
+            this.messageHistory.aiMessage(content);
+            this.scrollToBottom();
+        }
+
+        addUserMessage(content) {
+            const userMessageEl = document.createElement('div');
+            userMessageEl.className = 'chat-message user';
+            userMessageEl.textContent = content;
+            this.chatContent.appendChild(userMessageEl);
+            this.scrollToBottom();
+        }
+
+        addNoAiMessage(content) {
+            const contentMessage = document.createElement('div');
+            contentMessage.className = 'chat-message assistant';
+            if (content instanceof HTMLElement)
+                contentMessage.appendChild(content);
+            else
+                contentMessage.innerHTML = marked.parse(content || '');
+            this.chatContent.appendChild(contentMessage);
+            this.scrollToBottom();
+        }
+
+        async analyzePageForResearch() {
+            if (!this.researchGoal) {
+                this.addNoAiMessage("Research mode is not active. Use /research <goal> to start research mode first.");
+                return null;
+            }
+
+            const content = getPageContent();
+            this.messageHistory.userMessage(`Based on my research goal: "${this.researchGoal}", what insights can I gain from this page?`);
+            this.addAssistantMessage("Analyzing the page content based on your research goal...");
+            
+            try {
+                const response = await sendQuery(this.config, this.messageHistory);
+                return response.choices[0].message;
+            } catch (error) {
+                console.error('Error analyzing page:', error);
+                this.addNoAiMessage("⚠️ Error analyzing the page. Please try again.");
+                return null;
+            }
+        }
+
+        async sendMessage() {
+            const userMessage = this.userInput.value.trim();
+            if (!userMessage) return;
+
+            this.addUserMessage(userMessage);
+            this.userInput.value = '';
+
+            if (!this.config.llm) {
+                this.config.llm = userMessage;                
+                this.addAssistantMessage("I have selected the following LLM: " + this.config.llm);
+                this.messageHistory.init()
+                return;
+            }
+
+            let query = userMessage;
+            query = this.currentPreProcessPromptFunction(userMessage);
+            if (!query)
+                return
+
+            await this.sendChatMessage(query);
+        }
+
+        async sendChatMessage(query, isResearchAnalysis = false) {
+            this.userInput.disabled = true;
+            this.sendBtn.disabled = true;
+            const typingIndicator = createTypingIndicator();
+            this.chatContent.appendChild(typingIndicator);
+
+            try {
+                messageHistory.userMessage(query)
+                const response = await sendQuery(this.config, messageHistory);
+
+                let content = await handleToolCalls(response.choices[0].message)
+                this.addAssistantMessage(content);
+
+                // If this is a research analysis, process it for research notes
+                if (isResearchAnalysis && this.researchGoal) {
+                    await this.addResearchNote(content);
+                }
+
+            } catch (error) {
+                console.error('Error:', error);
+                this.addNoAiMessage("An error occurred: " + error.message);
+            } finally {
+                if (this.chatContent.contains(typingIndicator)) {
+                    this.chatContent.removeChild(typingIndicator);
+                }
+                this.scrollToBottom();
+                this.userInput.disabled = false;
+                this.sendBtn.disabled = false;
+                this.userInput.focus();
             }
         }
 
@@ -298,228 +628,161 @@
             }
         }
 
-        showConfigPanel() {
-            this.chatContent.style.display = 'none';
-            this.userInputArea.style.display = 'none';
-            this.configPanel.style.display = 'block';
-            this.refreshModels();
-        }
-
-        hideConfigPanel() {
-            this.configPanel.style.display = 'none';
-            this.chatContent.style.display = 'block';
-            this.userInputArea.style.display = 'flex';
-        }
-
-        async saveConfig(configParam) {
-            const newConfig = {
-                ...this.config,
-                ...configParam
-            };
-
-            this.config = newConfig;
-            await GM.setValue("config", newConfig);
-            this.hideConfigPanel();
-            this.addAssistantMessage("Configuration saved successfully!");
-        }
-
-        async saveResearchState() {
-            const updatedConfig = {
-                ...this.config,
-                research_mode: this.researchMode,
-                research_goal: this.researchGoal
-            };
-            this.config = updatedConfig;
-            await GM.setValue("config", updatedConfig);
-        }
-
-        showPanel(selection) {
-            this.chatOverlay.classList.add('visible');
-            this.chatOpenButton.hide();
-            let selectedText = selection?.toString();
-            console.log("Selected text: " + selectedText);
-            
-            if (this.researchMode && this.researchGoal && !this.currentPageAnalyzed) {
-                this.currentPageAnalyzed = true;
-                this.messageHistory.userMessage(`Based on my research goal: "${this.researchGoal}", what insights can I gain from this page?`);
-                this.addAssistantMessage("Analyzing the page content based on your research goal...");
-                this.sendChatMessage(`Based on my research goal: "${this.researchGoal}", what insights can I gain from this page content:\n${getPageContent()}`);
-                return;
-            }
-            
-            if (!selectedText) {
-                this.userInput.focus();
-                return null;
-            }
-            
-            if (!this.researchMode) {
-                this.messageHistory.userMessage(`
-                    I have the following selected text and I may ask questions or discuss it.
-                    ----
-                    ${selectedText}
-                    ----
-                    `);
-                
-                this.addAssistantMessage(`You have selected text. Feel free to ask questions or discuss it.`);
-            }
-            this.userInput.focus();
-        }
-
-        closePanel() {
-            this.chatOverlay.classList.remove('visible');
-            this.chatOpenButton.show();
-        }
-
-        scrollToBottom() {
-            this.chatContent.scrollTop = this.chatContent.scrollHeight;
-        }
-
-        addAssistantMessage(content) {
-            const contentMessage = document.createElement('div');
-            contentMessage.className = 'chat-message assistant';
-            contentMessage.innerHTML = marked.parse(content || '');
-            this.chatContent.appendChild(contentMessage);
-            this.messageHistory.aiMessage(content);
-            this.scrollToBottom();
-        }
-
-        addUserMessage(content) {
-            const userMessageEl = document.createElement('div');
-            userMessageEl.className = 'chat-message user';
-            userMessageEl.textContent = content;
-            this.chatContent.appendChild(userMessageEl);
-            this.scrollToBottom();
-        }
-
-        addNoLLMMessage(content) {
-            const contentMessage = document.createElement('div');
-            contentMessage.className = 'chat-message assistant';
-            if (content instanceof HTMLElement)
-                contentMessage.appendChild(content);
-            else
-                contentMessage.innerHTML = marked.parse(content || '');
-            this.chatContent.appendChild(contentMessage);
-            this.scrollToBottom();
-        }
-
-        async sendMessage() {
-            const userMessage = this.userInput.value.trim();
-            if (!userMessage) return;
-
-            this.addUserMessage(userMessage);
-            this.userInput.value = '';
-
-            if (!this.config.llm) {
-                this.config.llm = userMessage;                
-                this.addAssistantMessage("I have selected the following LLM: " + this.config.llm);
-                this.messageHistory.init()
-                return;
-            }
-
-            let query = userMessage;
-            query = this.currentPreProcessPromptFunction(userMessage);
-            if (!query)
-                return
-
-            await this.sendChatMessage(query);
-        }
-
-        async sendChatMessage(query) {
-            this.userInput.disabled = true;
-            this.sendBtn.disabled = true;
-            const typingIndicator = createTypingIndicator();
-            this.chatContent.appendChild(typingIndicator);
-
-            try {
-                messageHistory.userMessage(query)
-                const response = await sendQuery(this.config, messageHistory);
-
-                console.log("response: " + JSON.stringify(response, null, 2))
-                let content = await handleToolCalls(response.choices[0].message)
-                this.addAssistantMessage(content);
-
-            } catch (error) {
-                console.error('Error:', error);
-                this.addAssistantMessage("An error occurred: " + error.message);
-            } finally {
-                if (this.chatContent.contains(typingIndicator)) {
-                    this.chatContent.removeChild(typingIndicator);
-                }
-                this.scrollToBottom();
-                this.userInput.disabled = false;
-                this.sendBtn.disabled = false;
-                this.userInput.focus();
-            }
-        }
-
         defaultPreProcessPrompt(userInput) {
             const input = userInput.toLowerCase().trim();
-            
-            if (input.startsWith('/research ')) {
-                const goal = userInput.slice(10).trim();
-                if (!goal) {
-                    this.addNoLLMMessage("Please specify a research goal. Usage: /research <your research goal>");
-                    return null;
+            const commands = [
+                { 
+                    command: '/help',
+                    description: 'Show help',
+                    action: () => {
+                        const commandList = commands
+                            .map(c => `- ${c.command}${c.usage || ''}: ${c.description}`)
+                            .join('\n');
+                        this.addNoAiMessage("Available commands:\n" + commandList);
+                        return null;
+                    },
+                    acceptInput: (input) => input === '/help'
+                },
+                { 
+                    command: '/research-now',
+                    description: 'Analyze current page for research',
+                    action: async () => {
+                        if (!this.researchGoal) {
+                            this.addNoAiMessage("Research mode is not active. Use /research <goal> to start research mode first.");
+                            return null;
+                        }
+                        return this.analyzePageForResearch();
+                    },
+                    acceptInput: (input) => input === '/research-now'
+                },
+                { 
+                    command: '/overview',
+                    description: 'Get an overview of the page content',
+                    action: () => summarizePrompt(),
+                    acceptInput: (input) => input === '/overview'
+                },
+                {
+                    command: '/reset',
+                    description: 'Reset all settings and research data',
+                    action: () => {
+                        GM.deleteValue("config");
+                        GM.deleteValue("research_notes");
+                        this.config = defaultConfig;
+                        this.researchGoal = null;
+                        this.currentPageAnalyzed = false;
+                        this.researchNotes = [];
+                        initConfig(this);
+                        this.addNoAiMessage("All settings and research data have been reset.");
+                        return null;
+                    },
+                    acceptInput: (input) => input === '/reset'
+                },
+                {
+                    command: '/reset_history',
+                    description: 'Reset the chat history',
+                    action: () => {
+                        this.messageHistory.init();
+                        this.addNoAiMessage("Chat history has been reset.");
+                        return null;
+                    },
+                    acceptInput: (input) => input === '/reset_history'
+                },
+                {
+                    command: '/research',
+                    description: 'Start research mode with a goal',
+                    usage: ' <goal>',
+                    action: () => {
+                        const goal = userInput.slice(10).trim();
+                        if (!goal) {
+                            this.addNoAiMessage("Please specify a research goal. Usage: /research <your research goal>");
+                            return null;
+                        }
+                        this.researchGoal = goal;
+                        this.currentPageAnalyzed = false;
+                        this.researchNotes = [];
+                        this.saveResearchNotes();
+                        this.saveResearchState();
+                        this.researchButton.show();
+                        this.addNoAiMessage(`Research mode activated. Goal: "${goal}"\nI will analyze each page you visit based on this research goal.`);
+                        return null;                        
+                    },
+                    acceptInput: (input) => input.startsWith('/research ')
+                },
+                {
+                    command: '/stop_research',
+                    description: 'Stop research mode',
+                    action: () => {
+                        if (!this.researchGoal) {
+                            this.addNoAiMessage("Research mode is not active.");
+                            return null;
+                        }
+                        this.researchGoal = null;
+                        this.currentPageAnalyzed = false;
+                        this.researchNotes = [];
+                        this.saveResearchNotes();
+                        this.saveResearchState();
+                        this.researchButton.hide();
+                        this.addNoAiMessage("Research mode deactivated.");
+                        return null;
+                    },
+                    acceptInput: (input) => input === '/stop_research'
+                },
+                {
+                    command: '/reanalyze',
+                    description: 'Re-analyze the current page',
+                    action: async () => {
+                        if (!this.researchGoal) {
+                            this.addNoAiMessage("Research mode is not active.");
+                            return null;
+                        }
+                        return this.analyzePageForResearch();
+                    },
+                    acceptInput: (input) => input === '/reanalyze'
+                },
+                {
+                    command: '/notes',
+                    description: 'Show collected research notes',
+                    action: () => {
+                        if (!this.researchGoal) {
+                            this.addNoAiMessage("Research mode is not active.");
+                            return null;
+                        }
+                        if (this.researchNotes.length === 0) {
+                            this.addNoAiMessage("No research notes collected yet.");
+                            return null;
+                        }
+                        const relevantNotes = this.researchNotes.filter(note => note.isRelevant);
+                        const notRelevantCount = this.researchNotes.length - relevantNotes.length;
+                        
+                        let message = `# Research Notes\nGoal: "${this.researchGoal}"\n\n`;
+                        message += `📊 Stats: ${relevantNotes.length} relevant pages found (${notRelevantCount} not relevant)\n\n`;
+                        
+                        if (relevantNotes.length > 0) {
+                            message += "## Relevant Pages\n\n";
+                            relevantNotes.forEach((note, index) => {
+                                message += `### ${index + 1}. ${note.summary}\n`;
+                                message += `🔗 ${note.url}\n\n`;
+                                message += `📝 Insights:\n${note.insights}\n\n---\n\n`;
+                            });
+                        }
+                        
+                        this.addNoAiMessage(message);
+                        return null;                        
+                    },
+                    acceptInput: (input) => input === '/notes'
                 }
-                this.researchMode = true;
-                this.researchGoal = goal;
-                this.currentPageAnalyzed = false;
-                this.saveResearchState();
-                this.addNoLLMMessage(`Research mode activated. Goal: "${goal}"\nI will analyze each page you visit based on this research goal.`);
-                return null;
+            ];
+
+            if (!input.startsWith('/')) return input;
+
+            for (const command of commands) {
+                if (command.acceptInput(input)) {
+                    return command.action();
+                }
             }
             
-            switch(input) {
-                case '/help':
-                    this.addNoLLMMessage("commands:\n- /help: Show this help message\n- /overview: Get page overview\n- /reset: Reset configuration\n- /config: Show current config\n- /research <goal>: Set research goal and activate research mode\n- /stop_research: Stop research mode\n- /reanalyze: Force reanalysis of current page in research mode");
-                    return null;
-                    
-                case "/overview":
-                    return summarizePrompt();
-
-                case "/config":
-                    this.addNoLLMMessage("The current configuration is:\n ```json\n" + JSON.stringify(this.config, null, 2) + "\n```");
-                    return null;
-
-                case "/reset":
-                    GM.deleteValue("config")
-                    this.config = defaultConfig
-                    this.researchMode = false;
-                    this.researchGoal = null;
-                    this.currentPageAnalyzed = false;
-                    initConfig(this)
-                    return null;
-                    
-                case '/reset_history':
-                    this.messageHistory.init()
-                    return null;
-                    
-                case '/stop_research':
-                    if (!this.researchMode) {
-                        this.addNoLLMMessage("Research mode is not active.");
-                        return null;
-                    }
-                    this.researchMode = false;
-                    this.researchGoal = null;
-                    this.currentPageAnalyzed = false;
-                    this.saveResearchState();
-                    this.addNoLLMMessage("Research mode deactivated.");
-                    return null;
-                    
-                case '/reanalyze':
-                    if (!this.researchMode) {
-                        this.addNoLLMMessage("Research mode is not active.");
-                        return null;
-                    }
-                    this.currentPageAnalyzed = false;
-                    this.messageHistory.userMessage(`Based on my research goal: "${this.researchGoal}", what insights can I gain from this page?`);
-                    this.addAssistantMessage("Re-analyzing the page content based on your research goal...");
-                    this.sendChatMessage(`Based on my research goal: "${this.researchGoal}", what insights can I gain from this page content:\n${getPageContent()}`);
-                    return null;
-                
-                default:
-                    return userInput;
-            }
+            this.addNoAiMessage("Unknown command. Type /help for a list of available commands.");
+            return null;
         }
     }    
 
@@ -634,6 +897,77 @@
 
         show() {
             this.button.classList.remove('hidden');
+        }
+    }
+
+    class ResearchButton {
+        constructor(shadowRoot, chatModal) {
+            this.shadowRoot = shadowRoot;
+            this.chatModal = chatModal;
+            this.button = document.createElement('button');
+            this.button.id = 'research-btn';
+            this.button.innerText = '🔍';
+            this.button.title = 'Analyze page for research';
+            this.button.style.display = 'none';
+            
+            this.analyzing = false;
+            this.analyzed = false;
+            
+            this.button.addEventListener('click', () => this.handleClick());
+            this.shadowRoot.appendChild(this.button);
+        }
+        
+        async handleClick() {
+            if (this.analyzing) return;
+            
+            if (this.analyzed) {
+                // If already analyzed, show the panel with insights
+                this.chatModal.showPanel();
+                return;
+            }
+            
+            // Start analysis
+            this.analyzing = true;
+            this.button.innerText = '⌛';
+            this.button.title = 'Analyzing page...';
+            
+            try {
+                const insights = await this.chatModal.analyzePageForResearch();
+                if (insights) {
+                    // Store insights for when panel is opened
+                    this.chatModal.pendingInsights = insights.content;
+
+                    // Update button state
+                    this.analyzed = true;
+                    this.button.innerText = '✅';
+                    this.button.title = 'View research insights';
+                } else {
+                    // Error occurred during analysis
+                    this.button.innerText = '❌';
+                    this.button.title = 'Error analyzing page. Click to retry.';
+                    this.analyzed = false;
+                }
+            } catch (error) {
+                console.error('Error in research button:', error);
+                this.button.innerText = '❌';
+                this.button.title = 'Error analyzing page. Click to retry.';
+                this.analyzed = false;
+            }
+            
+            this.analyzing = false;
+        }
+        
+        show() {
+            this.button.style.display = 'block';
+            // Reset state when showing
+            this.analyzing = false;
+            this.analyzed = false;
+            this.button.innerText = '🔍';
+            this.button.title = 'Analyze page for research';
+        }
+        
+        hide() {
+            this.button.style.display = 'none';
         }
     }
 
@@ -791,26 +1125,68 @@
                 all: initial;
                 font-family: Arial, sans-serif;
             }
-            #assistant-btn {
+
+            .modal-overlay {
+                display: none;
                 position: fixed;
-                bottom: 50vh;
-                right: 12px;
-                z-index: 1000;
-                padding: 10px 15px;
-                background-color: #ff0000;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                font-size: 14px;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0, 0, 0, 0.5);
+                justify-content: center;
+                align-items: center;
+                z-index: 10000;
+            }
+
+            #assistant-btn, #research-btn {
+                position: fixed;
+                right: 20px;
+                width: 40px;
+                height: 40px;
+                border-radius: 50%;
+                background: white;
+                border: 2px solid #ddd;
                 cursor: pointer;
+                font-size: 20px;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+                transition: all 0.3s ease;
+                z-index: 10000;
                 opacity: 0.3;
             }
-            #assistant-btn:hover {
-                background-color: #cc0000;
-                opacity: 1.0;
+
+            #assistant-btn {
+                bottom: 50vh;  /* Center vertically */
             }
-            #assistant-btn.hidden {
+
+            #research-btn {
+                bottom: calc(50vh + 50px);  /* 50px above the assistant button */
+                background: #f0f8ff;  /* Light blue background */
+            }
+
+            #assistant-btn:hover, #research-btn:hover {
+                transform: scale(1.1);
+                box-shadow: 0 3px 7px rgba(0,0,0,0.3);
+                opacity: 1;
+            }
+
+            #assistant-btn.hidden, #research-btn.hidden {
                 display: none !important;
+            }
+
+            #research-btn[title*="Error"] {
+                background: #fff0f0;  /* Light red background for error state */
+                border-color: #ffcccc;
+                opacity: 1;
+            }
+
+            #research-btn[title*="Analyzing"] {
+                background: #f0fff0;  /* Light green background while analyzing */
+                border-color: #ccffcc;
+                opacity: 1;
+            }
+            #research-btn[title*="View"] {
+                opacity: 1;
             }
 
             .chat-modal {
@@ -824,7 +1200,7 @@
                 z-index: 1001;
                 width: 80%;
                 max-width: 600px;
-                height: 70vh;
+                height: 85vh;
                 display: flex;
                 flex-direction: column;
                 color: #000;
@@ -835,6 +1211,7 @@
                 justify-content: flex-end;
                 padding: 10px;
                 border-bottom: 1px solid #e0e0e0;
+                flex-shrink: 0;
             }
 
             .config-button {
@@ -855,6 +1232,49 @@
             .config-panel {
                 padding: 20px;
                 display: none;
+                height: 100%;
+                display: flex;
+                flex-direction: column;
+            }
+
+            .config-tabs {
+                display: flex;
+                gap: 10px;
+                margin-bottom: 20px;
+                background: white;
+                z-index: 1;
+                padding-bottom: 10px;
+                flex-shrink: 0;
+            }
+
+            .tab-button {
+                padding: 8px 16px;
+                border: none;
+                background: none;
+                border-bottom: 2px solid transparent;
+                cursor: pointer;
+                font-size: 14px;
+                color: #666;
+            }
+
+            .tab-button:hover {
+                color: #007bff;
+            }
+
+            .tab-button.active {
+                color: #007bff;
+                border-bottom-color: #007bff;
+            }
+
+            .tab-content {
+                display: none;
+                overflow-y: auto;
+                flex: 1;
+                margin-bottom: 70px;
+            }
+
+            .tab-content.active {
+                display: block;
             }
 
             .config-field {
@@ -864,7 +1284,19 @@
             .config-field label {
                 display: block;
                 margin-bottom: 5px;
-                font-weight: bold;
+                color: #666;
+                font-size: 13px;
+            }
+
+            .checkbox-field label {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                cursor: pointer;
+                color: #333;
+                font-size: 14px;
+                font-weight: normal;
             }
 
             .config-field input,
@@ -874,6 +1306,34 @@
                 padding: 8px;
                 border: 1px solid #ddd;
                 border-radius: 4px;
+                font-size: 14px;
+            }
+
+            .config-field textarea {
+                height: 100px;
+                resize: vertical;
+                line-height: 1.4;
+            }
+
+            .config-field input:focus,
+            .config-field textarea:focus,
+            .config-field select:focus {
+                outline: none;
+                border-color: #007bff;
+                box-shadow: 0 0 0 2px rgba(0,123,255,.25);
+            }
+
+            .checkbox-field input[type="checkbox"] {
+                width: auto;
+                margin: 0;
+                cursor: pointer;
+            }
+
+            h3 {
+                font-size: 16px;
+                color: #333;
+                margin-bottom: 20px;
+                font-weight: 500;
             }
 
             .model-selection {
@@ -898,32 +1358,49 @@
                 background-color: #f0f0f0;
             }
 
-            .config-field textarea {
-                height: 100px;
-                resize: vertical;
-            }
-
             .config-buttons {
                 display: flex;
                 justify-content: flex-end;
                 gap: 10px;
+                position: fixed;
+                bottom: 7.5vh;
+                right: 20px;
+                background: white;
+                padding: 15px 20px;
+                width: calc(80% - 40px);
+                max-width: 560px;
             }
 
-            .config-buttons button {
+            .config-buttons button,
+            .research-save,
+            .research-cancel {
                 padding: 8px 16px;
                 border: none;
                 border-radius: 4px;
                 cursor: pointer;
+                font-size: 14px;
             }
 
-            .config-save {
+            .config-save,
+            .research-save {
                 background-color: #007bff;
                 color: white;
             }
 
-            .config-cancel {
+            .config-save:hover,
+            .research-save:hover {
+                background-color: #0056b3;
+            }
+
+            .config-cancel,
+            .research-cancel {
                 background-color: #6c757d;
                 color: white;
+            }
+
+            .config-cancel:hover,
+            .research-cancel:hover {
+                background-color: #545b62;
             }
 
             .chat-content {
@@ -931,7 +1408,7 @@
                 overflow-y: auto;
                 padding: 15px;
                 border-bottom: 1px solid #e0e0e0;
-                max-height: calc(70vh - 150px);
+                max-height: calc(85vh - 150px);
             }
 
             .chat-message {
@@ -979,17 +1456,6 @@
                 cursor: pointer;
             }
 
-            .modal-overlay {
-                position: fixed;
-                top: 0;
-                left: 0;
-                right: 0;
-                bottom: 0;
-                background-color: rgba(0,0,0,0.5);
-                z-index: 1000;
-                display: none;
-            }
-
             .modal-overlay.visible {
                 display: flex;
                 justify-content: center;
@@ -1014,6 +1480,25 @@
             }
             .llm-list li:hover {
                 background-color: #f0f0f0;
+            }
+            .config-field label {
+                display: block;
+                margin-bottom: 5px;
+                font-weight: bold;
+            }
+
+            .checkbox-field label {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                cursor: pointer;
+            }
+
+            .checkbox-field input[type="checkbox"] {
+                width: auto;
+                margin: 0;
+                cursor: pointer;
             }
         `;
         shadowRoot.appendChild(style);
@@ -1089,6 +1574,39 @@
         // }
         return message.content
     }
+
+    async function saveToDontpad(documentName, text) {
+        const tsResponse = await fetch(`https://api.dontpad.com/${documentName}.body.json?lastModified=0`);
+        if (tsResponse.status === 200) {
+            const lm = JSON.parse(tsResponse.responseText).lastModified;
+
+            // Then, post the text
+            const postResponse = await fetch(`https://api.dontpad.com/${documentName}`, {
+                method: 'POST',
+                data: new URLSearchParams({
+                    lastModified: lm,
+                    force: 'false',
+                    text: text
+                }).toString(),
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                onload: function(postResponse) {
+                    if (postResponse.status === 200) {
+                        console.log('Success');
+                        console.log(postResponse.responseText);
+                    } else {
+                        console.error('Post failed', postResponse);
+                    }
+                },
+                onerror: function(error) {
+                    console.error('Error posting:', error);
+                }
+            });
+        } else {
+            console.error('Failed to get last modified', tsResponse);
+        }
+    }    
 
 
     main()
