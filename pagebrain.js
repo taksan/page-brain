@@ -170,226 +170,227 @@ ${content}`;
     }
 
     createElements(shadowRoot) {
-      this.chatOverlay = document.createElement("div");
-      this.chatOverlay.className = "modal-overlay";
+      _node(shadowRoot).children(
+        _node(this.chatOverlay = _div("modal-overlay"))
+          .children(
+            _node(this.modal = _div("chat-modal")).children(
+              headerArea(this),
+              configPanel(this),
+              chatMessageArea(this),
+              userInputArea(this)
+            )
+          )
+      )
 
-      this.modal = document.createElement("div");
-      this.modal.className = "chat-modal";
-      this.chatOverlay.appendChild(this.modal);
-      shadowRoot.appendChild(this.chatOverlay);
-
-      this.modal.appendChild(createHeaderArea(this));
-      this.configPanel = createConfigPanel(this);
-      this.modal.appendChild(this.configPanel);
-
-      this.chatContent = createChatMessageArea();
-      this.modal.appendChild(this.chatContent);
-
-      let { userInput, sendBtn, userInputArea } = createSendUserInput(this);
-      this.modal.appendChild(userInputArea);
-      this.userInput = userInput;
-      this.sendBtn = sendBtn;
-      this.userInputArea = userInputArea;
       this.researchModeAlertPrinted = false;
 
-      function createChatMessageArea() {
-        let chatContent = document.createElement("div");
-        chatContent.className = "chat-content";
-        return chatContent;
+      function chatMessageArea(self) {
+        self.chatContent = _node('div')
+          .attr({ className: "chat-content" })
+          .build();
+        return self.chatContent;
       }
 
-      function createSendUserInput(self) {
-        const userInputArea = document.createElement("div");
-        userInputArea.className = "chat-input-area";
+      function userInputArea(self) {
+        const userInput = _node('textarea')
+          .attr({
+            className: "chat-input",
+            placeholder: "Ask a question about the page..."
+          })
+          .on("keypress", (e) => {
+            if (e.key === "Enter" && !e.ctrlKey) {
+              self.sendMessage();
+              e.preventDefault();
+            }
+          })
+          .build();
 
-        let userInput = document.createElement("textarea");
-        userInput.className = "chat-input";
-        userInput.placeholder = "Ask a question about the page...";
-        userInput.addEventListener("keypress", (e) => {
-          if (e.key === "Enter" && !e.ctrlKey) {
-            self.sendMessage();
-            e.preventDefault();
-          }
-        });
+        const sendBtn = _node('button')
+          .attr({
+            className: "chat-send-btn",
+            innerText: "Send"
+          })
+          .on("click", () => self.sendMessage())
+          .build();
 
-        let sendBtn = document.createElement("button");
-        sendBtn.className = "chat-send-btn";
-        sendBtn.innerText = "Send";
-        sendBtn.addEventListener("click", () => self.sendMessage());
-
-        userInputArea.appendChild(userInput);
-        userInputArea.appendChild(sendBtn);
         ignoreKeyStrokesWhenInputHasFocus(shadowRoot, userInput);
+        self.userInput = userInput;
+        self.sendBtn = sendBtn;
 
-        return { userInput, sendBtn, userInputArea };
+        self.userInputArea = _node('div')
+          .attr({ className: "chat-input-area" })
+          .children(userInput, sendBtn)
+          .build();
+
+        return self.userInputArea;
       }
 
-      function createHeaderArea(self) {
-        let headerArea = document.createElement("div");
-        headerArea.className = "chat-header";
-
-        let configBtn = document.createElement("button");
-        configBtn.className = "config-button";
-        configBtn.innerHTML = "⚙️";
-        configBtn.title = "Configure";
-
-        let closeBtn = document.createElement("button");
-        closeBtn.className = "close-button";
-        closeBtn.innerHTML = "×";
-        closeBtn.onclick = () => self.closePanel();
-
-        headerArea.appendChild(configBtn);
-        headerArea.appendChild(closeBtn);
-        configBtn.addEventListener("click", () => self.showConfigPanel());
-        return headerArea;
+      function headerArea(self) {
+        return _node('div')
+          .attr({ className: "chat-header" })
+          .children(
+            _node('button')
+              .attr({
+                className: "config-button",
+                innerHTML: "⚙️",
+                title: "Configure"
+              })
+              .on("click", () => self.showConfigPanel()), 
+            
+            _node('button')
+            .attr({
+              className: "close-button",
+              innerHTML: "×"
+            })
+            .on("click", () => self.closePanel())              
+          )
+          .build();
       }
 
-      function createConfigPanel(self) {
-        // Create config panel
-        const configPanel = document.createElement("div");
-        configPanel.className = "config-panel";
-        configPanel.style.display = "none";
-
-        // Create tab buttons
-        const tabButtons = document.createElement("div");
-        tabButtons.className = "config-tabs";
-        configPanel.appendChild(tabButtons);
-
-        const { llmSettingsForm, llmSettingsButton } = createLlmConfig();
-
-        configPanel.appendChild(llmSettingsForm);
-
-        // Research tab
-        const researchTab = document.createElement("button");
-        researchTab.textContent = "Research";
-        researchTab.className = "tab-button";
-        tabButtons.appendChild(researchTab);
-
-        const researchForm = document.createElement("form");
-        researchForm.className = "tab-content research-tab";
-        researchForm.innerHTML = `
-            <div class="config-field">
-                <label>Research Goal:</label>
-                <textarea id="research-goal">${self.config.research_goal || ""}</textarea>
-            </div>
-            <div class="config-buttons">
-                <button type="button" class="research-save">Save</button>
-                <button type="button" class="research-cancel">Cancel</button>
-            </div>
-        `;
-
-        const researchSaveBtn = researchForm.querySelector(".research-save");
-        researchSaveBtn.addEventListener("click", () => {
-          self.researchGoal =
-            researchForm.querySelector("#research-goal").value;
-          self.saveResearchState();
-          if (self.researchGoal) {
-            self.researchButton.show();
-          } else {
-            self.researchButton.hide();
-          }
-          self.hideConfigPanel();
-        });
-
-        const researchCancelBtn =
-          researchForm.querySelector(".research-cancel");
-        researchCancelBtn.addEventListener("click", () =>
-          self.hideConfigPanel(),
-        );        
-
-        configPanel.appendChild(researchForm);
-
-        // Tab switching logic
-        llmSettingsButton.addEventListener("click", () => {
-          llmSettingsButton.classList.add("active");
-          researchTab.classList.remove("active");
-          llmSettingsForm.classList.add("active");
-          researchForm.classList.remove("active");
-        });
-
-        researchTab.addEventListener("click", () => {
-          researchTab.classList.add("active");
-          llmSettingsButton.classList.remove("active");
-          researchForm.classList.add("active");
-          llmSettingsForm.classList.remove("active");
-        });
-
-
-        return configPanel;
-
-        function createLlmConfig() {
-          const llmSettingsButton = document.createElement("button");
-          llmSettingsButton.textContent = "LLM Settings";
-          llmSettingsButton.className = "tab-button active";
-          tabButtons.appendChild(llmSettingsButton);
-
-          // Create settings form
-          const llmSettingsForm = document.createElement("form");
-          llmSettingsForm.className = "tab-content settings-tab active";
-          llmSettingsForm.innerHTML = `
-          <div class="config-field">
-              <label>System Prompt:</label>
-              <textarea id="prompt-config">${self.config.prompt}</textarea>
-          </div>
-          <div class="config-field">
-              <label>Chat URL:</label>
-              <input type="text" id="chat-url-config" value="${self.config.chat_url}">
-          </div>
-          <div class="config-field">
-              <label>Models URL:</label>
-              <input type="text" id="models-url-config" value="${self.config.models_url}">
-          </div>
-          <div class="config-field">
-              <label>Api Token:</label>
-              <input type="password" id="api-token" value="${self.config.apiToken}">
-          </div>
-          <div class="config-field">
-              <label>Model:</label>
-              <div class="model-selection">
-                  <select id="model-config"></select>
-                  <button type="button" class="refresh-models" title="Refresh models">🔄</button>
-              </div>
-              <div id="model-info" style="margin-top: 8px; font-size: 0.9em;"></div>
-          </div>
-          <div class="config-buttons">
-              <button type="button" class="config-save">Save</button>
-              <button type="button" class="config-cancel">Cancel</button>
-          </div>
-        `;
-
-          llmSettingsForm.querySelectorAll("input").forEach((input) => {
+      function configPanel(self) {
+        const tabButtons = _node('div')
+          .attr({ className: "config-tabs" })
+          .build();
+        
+        self.configPanel = _node('div')
+          .attr({ 
+            className: "config-panel",
+            style: "display: none" 
+          })
+          .children(
+            tabButtons,
+            configTab("LLM Settings", createLlmConfig()),
+            configTab("Research", createResearchTab())
+          )
+          .build();
+          _$(self.configPanel).qa("input, textarea").forEach(input => {
             ignoreKeyStrokesWhenInputHasFocus(shadowRoot, input);
           });
 
+        return self.configPanel;
 
-          const saveBtn = llmSettingsForm.querySelector(".config-save");
-          saveBtn.addEventListener("click", () => {
-            const config = {
-              prompt: llmSettingsForm.querySelector("#prompt-config").value,
-              chat_url: llmSettingsForm.querySelector("#chat-url-config").value,
-              models_url: llmSettingsForm.querySelector("#models-url-config").value,
-              apiToken: llmSettingsForm.querySelector("#api-token").value,
-              llm: llmSettingsForm.querySelector("#model-config").value,
-            };
-            self.saveConfig(config);
-          });
+        function configTab(tabName, configForm) {
+          const tabButton = _node('button')
+            .attr({
+              textContent: tabName,
+              className: "tab-button",
+              targetForm: configForm
+            })
+            .on("click", () => activateTab(tabButton, configForm))
+            .build();
 
-          const cancelBtn = llmSettingsForm.querySelector(".config-cancel");
-          cancelBtn.addEventListener("click", () => self.hideConfigPanel());
-
-          const refreshBtn = llmSettingsForm.querySelector(".refresh-models");
-          refreshBtn.addEventListener("click", () => {
-            const config = {
-              prompt: llmSettingsForm.querySelector("#prompt-config").value,
-              chat_url: llmSettingsForm.querySelector("#chat-url-config").value,
-              models_url: llmSettingsForm.querySelector("#models-url-config").value,
-              apiToken: llmSettingsForm.querySelector("#api-token").value,
-              llm: llmSettingsForm.querySelector("#model-config").value,
-            };
-            self.refreshModels(config);
-          });
-          return { llmSettingsForm, llmSettingsButton };
+          tabButtons.appendChild(tabButton);
+          return configForm;
         }
+
+        function activateTab(tabButton, tabContent) {
+          tabButtons
+            .querySelectorAll(".tab-button")
+            .forEach((button) => {
+              button.classList.remove("active");
+              button.targetForm.classList.remove("active");
+            });
+
+          tabButton.classList.add("active");
+          tabContent.classList.add("active");
+        }
+
+        function createLlmConfig() {
+          return _node('form')
+            .attr({ className: "tab-content settings-tab active" })
+            .html(`
+              <div class="config-field">
+                  <label>System Prompt:</label>
+                  <textarea id="prompt-config">${self.config.prompt}</textarea>
+              </div>
+              <div class="config-field">
+                  <label>Chat URL:</label>
+                  <input type="text" id="chat-url-config" value="${self.config.chat_url}">
+              </div>
+              <div class="config-field">
+                  <label>Models URL:</label>
+                  <input type="text" id="models-url-config" value="${self.config.models_url}">
+              </div>
+              <div class="config-field">
+                  <label>Api Token:</label>
+                  <input type="password" id="api-token" value="${self.config.apiToken}">
+              </div>
+              <div class="config-field">
+                  <label>Model:</label>
+                  <div class="model-selection">
+                      <select id="model-config"></select>
+                      <button type="button" class="refresh-models" title="Refresh models">🔄</button>
+                  </div>
+                  <div id="model-info" style="margin-top: 8px; font-size: 0.9em;"></div>
+              </div>
+              <div class="config-buttons">
+                  <button type="button" class="config-save">Save</button>
+                  <button type="button" class="config-cancel">Cancel</button>
+              </div>
+            `)
+            .build(form => {
+              const $form = _$(form);
+              
+              $form.q(".config-save").addEventListener("click", () => {
+                const config = {
+                  prompt: $form.value("#prompt-config"),
+                  chat_url: $form.value("#chat-url-config"),
+                  models_url: $form.value("#models-url-config"),
+                  apiToken: $form.value("#api-token"),
+                  llm: $form.value("#model-config"),
+                };
+                self.saveConfig(config);
+              });
+
+              $form.q(".config-cancel").addEventListener("click", () => 
+                self.hideConfigPanel()
+              );
+
+              $form.q(".refresh-models").addEventListener("click", () => {
+                const config = {
+                  prompt: $form.value("#prompt-config"),
+                  chat_url: $form.value("#chat-url-config"),
+                  models_url: $form.value("#models-url-config"),
+                  apiToken: $form.value("#api-token"),
+                  llm: $form.value("#model-config"),
+                };
+                self.refreshModels(config);
+              });
+            });
+        }
+
+        function createResearchTab() {
+          return _node('form')
+            .attr({ className: "tab-content research-tab" })
+            .html(`
+              <div class="config-field">
+                  <label>Research Goal:</label>
+                  <textarea id="research-goal">${self.config.research_goal || ""}</textarea>
+              </div>
+              <div class="config-buttons">
+                  <button type="button" class="research-save">Save</button>
+                  <button type="button" class="research-cancel">Cancel</button>
+              </div>
+            `)
+            .build(form => {
+              const $form = _$(form);
+
+              $form.q(".research-save").addEventListener("click", () => {
+                self.researchGoal = $form.value("#research-goal");
+                self.saveResearchState();
+                if (self.researchGoal) {
+                  self.researchButton.show();
+                } else {
+                  self.researchButton.hide();
+                }
+                self.hideConfigPanel();
+              });
+
+              $form.q(".research-cancel").addEventListener("click", () => 
+                self.hideConfigPanel()
+              );
+            });
+        }        
       }
     }
 
@@ -494,28 +495,35 @@ ${content}`;
     }
 
     addAssistantMessage(content) {
-      const contentMessage = document.createElement("div");
-      contentMessage.className = "chat-message assistant";
-      contentMessage.innerHTML = marked.parse(content || "");
+      const contentMessage = _node('div')
+        .attr({ className: "chat-message assistant" })
+        .html(marked.parse(content || ""))
+        .build();
       this.chatContent.appendChild(contentMessage);
       this.messageHistory.aiMessage(content);
       this.scrollToBottom();
     }
 
     addUserMessage(content) {
-      const userMessageEl = document.createElement("div");
-      userMessageEl.className = "chat-message user";
-      userMessageEl.textContent = content;
+      const userMessageEl = _node('div')
+        .attr({ className: "chat-message user" })
+        .text(content)
+        .build();
       this.chatContent.appendChild(userMessageEl);
       this.scrollToBottom();
     }
 
     addNoAiMessage(content) {
-      const contentMessage = document.createElement("div");
-      contentMessage.className = "chat-message assistant";
-      if (content instanceof HTMLElement) contentMessage.appendChild(content);
-      else contentMessage.innerHTML = marked.parse(content || "");
-      this.chatContent.appendChild(contentMessage);
+      const contentMessage = _node('div')
+        .attr({ className: "chat-message assistant" });
+
+      if (content instanceof HTMLElement) {
+        contentMessage.children(content);
+      } else {
+        contentMessage.html(marked.parse(content || ""));
+      }
+
+      this.chatContent.appendChild(contentMessage.build());
       this.scrollToBottom();
     }
 
@@ -616,11 +624,13 @@ ${content}`;
         let models = jsonResponse.data || [];
         modelSelect.innerHTML = "";
         models.forEach((m) => {
-          const option = document.createElement("option");
-          const modelName = m.id;
-          option.value = modelName;
-          option.textContent = modelName;
-          if (modelName === this.config.llm) {
+          const option = _node('option')
+            .attr({
+              value: m.id,
+              textContent: m.id,
+            })
+            .build();
+          if (m.id === this.config.llm) {
             option.selected = true;
           }
           modelSelect.appendChild(option);
@@ -808,10 +818,11 @@ ${content}`;
   }
 
   function createShadowRoot() {
-    const container = document.createElement("div");
-    container.style.all = "initial";
-    container.style.position = "fixed";
-    container.style.zIndex = "9999";
+    const container = _node('div')
+      .attr({
+        style: "all: initial; position: fixed; z-index: 9999;",
+      })
+      .build();
     document.body.appendChild(container);
 
     return container.attachShadow({ mode: "open" });
@@ -824,10 +835,13 @@ ${content}`;
   class AssistantButton {
     constructor(shadowRoot) {
       this.shadowRoot = shadowRoot;
-      this.button = document.createElement("button");
-      this.button.id = "assistant-btn";
-      this.button.innerText = "✨";
-      this.button.title = "Talk about page content";
+      this.button = _node('button')
+        .attr({
+          id: "assistant-btn",
+          innerText: "✨",
+          title: "Talk about page content",
+        })
+        .build();
 
       // Drag functionality variables
       this.dragStarted = false;
@@ -924,10 +938,13 @@ ${content}`;
     constructor(shadowRoot, chatModal) {
       this.shadowRoot = shadowRoot;
       this.chatModal = chatModal;
-      this.button = document.createElement("button");
-      this.button.id = "research-btn";
-      this.button.innerText = "🔍";
-      this.button.title = "Analyze page for research";
+      this.button = _node('button')
+        .attr({
+          id: "research-btn",
+          innerText: "🔍",
+          title: "Analyze page for research",
+        })
+        .build();
       this.button.style.display = "none";
 
       this.analyzing = false;
@@ -1045,8 +1062,9 @@ ${content}`;
 
   function getPageContent() {
     // Create a temporary div to hold the page content
-    const tempDiv = document.createElement("div");
-    tempDiv.innerHTML = document.body.innerHTML;
+    const tempDiv = _node('div')
+      .html(document.body.innerHTML)
+      .build();
 
     // Remove all script and style tags
     const scriptsAndStyles = tempDiv.querySelectorAll("script, style");
@@ -1122,21 +1140,22 @@ ${content}`;
   }
 
   function createTypingIndicator() {
-    const typingContainer = document.createElement("div");
-    typingContainer.className = "typing-indicator chat-message assistant";
-    typingContainer.innerHTML = `
+    const typingContainer = _node('div')
+      .attr({ className: "typing-indicator chat-message assistant" })
+      .html(`
             <div class="typing-dots">
                 <span class="dot"></span>
                 <span class="dot"></span>
                 <span class="dot"></span>
             </div>
-        `;
+        `)
+      .build();
     return typingContainer;
   }
 
   function addStyling(shadowRoot) {
-    const style = document.createElement("style");
-    style.textContent = `
+    const style = _node('style')
+      .text(`
             :host {
                 all: initial;
                 font-family: Arial, sans-serif;
@@ -1516,13 +1535,14 @@ ${content}`;
                 margin: 0;
                 cursor: pointer;
             }
-        `;
+        `)
+      .build();
     shadowRoot.appendChild(style);
   }
 
   function addTypingStyle(shadowRoot) {
-    const style = document.createElement("style");
-    style.textContent = `
+    const style = _node('style')
+      .text(`
             .typing-indicator {
                 display: flex;
                 justify-content: center;
@@ -1559,8 +1579,84 @@ ${content}`;
                 0%, 100% { opacity: 0.6; transform: translateY(0); }
                 50% { opacity: 1; transform: translateY(-4px); }
             }
-        `;
+        `)
+      .build();
     shadowRoot.appendChild(style);
+  }
+
+  function _$(target) {
+    return {
+      q: function (selector) {
+        return target.querySelector(selector);
+      },
+      value: function (selector) {
+        return target.querySelector(selector)?.value;
+      },
+      qa: function (selector) {
+        return target.querySelectorAll(selector);
+      },
+    };
+  }
+
+  function _node(el) {
+    if (typeof el === 'string') {
+      el = document.createElement(el);
+    } 
+    else if (el.isWrapper) {
+      el = el.build();
+    }
+    else if (!(el instanceof Element) && !(el instanceof ShadowRoot)) {
+      console.error('Invalid element type:', el);
+      throw new Error('_node requires either a string tag name, a DOM element, or a ShadowRoot');
+    }
+    const wrapper = {
+      isWrapper: true,
+      children: (...children) => {
+        children.forEach(child => {
+          if (!child) return;
+          if (child.isWrapper) {
+            el.appendChild(child.build());
+          } else if (child instanceof Element || child instanceof ShadowRoot) {
+            el.appendChild(child);
+          } else if (typeof child === 'string' || typeof child === 'number') {
+            el.appendChild(document.createTextNode(child.toString()));
+          } else {
+            console.error('Invalid child type:', child);
+            throw new Error('Invalid child type');
+          }
+        });
+        return wrapper;
+      },
+      attr: (attrs) => {
+        Object.entries(attrs).forEach(([key, value]) => {
+          el[key] = value;
+        });
+        return wrapper;
+      },
+      on: (event, handler) => {
+        el.addEventListener(event, handler);
+        return wrapper;
+      },
+      html: (html) => {
+        el.innerHTML = html;
+        return wrapper;
+      },
+      text: (text) => {
+        el.textContent = text;
+        return wrapper;
+      },
+      build: (callback) => {
+        if (callback) callback(el);
+        return el;
+      }
+    };
+    return wrapper;
+  }
+
+  function _div(className) {
+    const el = document.createElement('div');
+    if (className) el.className = className;
+    return el;
   }
 
   async function handleToolCalls(message) {
