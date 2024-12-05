@@ -27,9 +27,52 @@
     research_goal: null,
   };
 
+  class ConfigModel {
+    constructor(initialConfig) {
+      this.config = { ...initialConfig };
+      this.listeners = new Set();
+    }
+
+    addListener(listener) {
+      this.listeners.add(listener);
+    }
+
+    removeListener(listener) {
+      this.listeners.delete(listener);
+    }
+
+    async set(key, value) {
+      await this.update({...this.config, [key]: value });
+    }
+
+    async update(changes) {
+      const newConfig = { ...this.config, ...changes };
+      if (JSON.stringify(newConfig) !== JSON.stringify(this.config)) {
+        this.config = newConfig;
+        await GM.setValue("config", newConfig);
+        this.notifyListeners();
+      }
+    }
+
+    get(key) {
+      return this.config[key];
+    }
+
+    getAll() {
+      return { ...this.config };
+    }
+
+    notifyListeners() {
+      for (const listener of this.listeners) {
+        listener(this.config);
+      }
+    }
+  }
+
   async function main() {
-    let config = await GM.getValue("config", defaultConfig);
-    messageHistory = new ChatHistory(config);
+    const storedConfig = await GM.getValue("config", defaultConfig);
+    const configModel = new ConfigModel(storedConfig);
+    messageHistory = new ChatHistory(configModel);
 
     let theShadowRoot = createShadowRoot();
     addStyling(theShadowRoot);
@@ -39,23 +82,26 @@
       theShadowRoot,
       assistantButton,
       messageHistory,
-      config,
+      configModel,
     );
-    if (!config.llm) {
-      initConfig(config, CHAT_MODAL);
+    if (!configModel.get('llm')) {
+      initConfig(CHAT_MODAL);
       return;
     }
     messageHistory.init();
   }
 
   class ChatHistory {
-    constructor(config) {
+    constructor(configModel) {
       this.history = [];
-      this.config = config;
+      this.configModel = configModel;
     }
 
     init() {
-      this.history = [{ role: "system", content: this.config.prompt }];
+      this.history = [{ role: "system", content: this.configModel.get('prompt') }];
+      this.configModel.addListener((config) => {
+        this.history.push({ role: "system", content: config.prompt });
+      });
       this.userMessage(
         "This is the current page content: \n" + getPageContent(),
       );
@@ -77,20 +123,34 @@
     }
   }
   class ChatModal {
-    constructor(shadowRoot, chatOpenButton, messageHistory, config) {
+    constructor(shadowRoot, chatOpenButton, messageHistory, configModel) {
       this.messageHistory = messageHistory;
-      this.config = config;
+      this.configModel = configModel;
       this.chatOpenButton = chatOpenButton;
       this.createElements(shadowRoot);
       this.currentPreProcessPromptFunction = this.defaultPreProcessPrompt;
-      this.researchGoal = this.config.research_goal || null;
       this.currentPageAnalyzed = false;
       this.researchNotes = [];
       this.pendingInsights = null;
       this.researchButton = new ResearchButton(shadowRoot, this);
-      this.loadResearchNotes();
 
-      if (this.researchGoal) {
+      this.loadResearchNotes();
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          this.closePanel();
+        }
+      });
+
+      // Listen for config changes
+      this.configModel.addListener((config) => {
+        if (config.research_goal) {
+          this.researchButton.show();
+        } else {
+          this.researchButton.hide();
+        }
+      });
+
+      if (this.configModel.get('research_goal')) {
         this.researchButton.show();
       } else {
         this.addAssistantMessage(
@@ -115,14 +175,14 @@
     "isRelevant": true or false (boolean value, no quotes)
 }
 
-Analyze the following insights about a webpage in relation to the research goal: "${this.researchGoal}"
+Analyze the following insights about a webpage in relation to the research goal: "${this.configModel.get('research_goal')}"
 
 Insights to analyze:
 ${content}`;
 
       try {
         this.messageHistory.userMessage(prompt);
-        const response = await sendQuery(this.config, this.messageHistory);
+        const response = await sendQuery(this.configModel, this.messageHistory);
         const aiMessage = response.choices[0].message.content.trim();
 
         // Try to extract JSON if it's wrapped in other text
@@ -185,10 +245,9 @@ ${content}`;
       this.researchModeAlertPrinted = false;
 
       function chatMessageArea(self) {
-        self.chatContent = _node('div')
+        return self.chatContent = _node('div')
           .attr({ className: "chat-content" })
           .build();
-        return self.chatContent;
       }
 
       function userInputArea(self) {
@@ -213,7 +272,6 @@ ${content}`;
           .on("click", () => self.sendMessage())
           .build();
 
-        ignoreKeyStrokesWhenInputHasFocus(shadowRoot, userInput);
         self.userInput = userInput;
         self.sendBtn = sendBtn;
 
@@ -244,10 +302,10 @@ ${content}`;
             })
             .on("click", () => self.closePanel())              
           )
-          .build();
       }
 
       function configPanel(self) {
+        self.configSets = []
         const tabButtons = _node('div')
           .attr({ className: "config-tabs" })
           .build();
@@ -259,8 +317,8 @@ ${content}`;
           })
           .children(
             tabButtons,
-            configTab("LLM Settings", createLlmConfig()),
-            configTab("Research", createResearchTab())
+            configTab("LLM Settings", createLlmConfig(self.configModel)),
+            configTab("Research", createResearchTab(self.configModel))
           )
           .build();
           _$(self.configPanel).qa("input, textarea").forEach(input => {
@@ -295,33 +353,32 @@ ${content}`;
           tabContent.classList.add("active");
         }
 
-        function createLlmConfig() {
-          return _node('form')
+        function createLlmConfig(configModel) {
+          const form = _node('form')
             .attr({ className: "tab-content settings-tab active" })
             .html(`
               <div class="config-field">
                   <label>System Prompt:</label>
-                  <textarea id="prompt-config">${self.config.prompt}</textarea>
+                  <textarea id="prompt-config"></textarea>
               </div>
               <div class="config-field">
                   <label>Chat URL:</label>
-                  <input type="text" id="chat-url-config" value="${self.config.chat_url}">
+                  <input type="text" id="chat-url-config">
               </div>
               <div class="config-field">
                   <label>Models URL:</label>
-                  <input type="text" id="models-url-config" value="${self.config.models_url}">
+                  <input type="text" id="models-url-config">
               </div>
               <div class="config-field">
                   <label>Api Token:</label>
-                  <input type="password" id="api-token" value="${self.config.apiToken}">
+                  <input type="password" id="api-token">
               </div>
               <div class="config-field">
                   <label>Model:</label>
-                  <div class="model-selection">
-                      <select id="model-config"></select>
-                      <button type="button" class="refresh-models" title="Refresh models">🔄</button>
-                  </div>
-                  <div id="model-info" style="margin-top: 8px; font-size: 0.9em;"></div>
+                  <select id="model-config">
+                      <option value="">Select a model</option>
+                  </select>
+                  <button type="button" class="refresh-models">🔄</button>
               </div>
               <div class="config-buttons">
                   <button type="button" class="config-save">Save</button>
@@ -331,18 +388,38 @@ ${content}`;
             .build(form => {
               const $form = _$(form);
               
-              $form.q(".config-save").addEventListener("click", () => {
-                const config = {
-                  prompt: $form.value("#prompt-config"),
-                  chat_url: $form.value("#chat-url-config"),
-                  models_url: $form.value("#models-url-config"),
-                  apiToken: $form.value("#api-token"),
-                  llm: $form.value("#model-config"),
-                };
-                self.saveConfig(config);
+              // Register handlers to update form when model changes
+              const formUpdateHandler = (config) => {
+                $form.q("#prompt-config").value = config.prompt || "";
+                $form.q("#chat-url-config").value = config.chat_url || "";
+                $form.q("#models-url-config").value = config.models_url || "";
+                $form.q("#api-token").value = config.apiToken || "";
+                $form.q("#model-config").value = config.llm || "";
+              };
+              
+              configModel.addListener(formUpdateHandler);
+
+              // Initial form values
+              const config = configModel.getAll();
+              formUpdateHandler(config);
+
+              $form.node(".config-save").on("click", async () => {
+                configModel.removeListener(formUpdateHandler);
+                try {
+                  await configModel.update({
+                    prompt: $form.value("#prompt-config"),
+                    chat_url: $form.value("#chat-url-config"),
+                    models_url: $form.value("#models-url-config"),
+                    apiToken: $form.value("#api-token"),
+                    llm: $form.value("#model-config"),
+                  });
+                } finally {
+                  configModel.addListener(formUpdateHandler);
+                }
+                self.saveConfig();
               });
 
-              $form.q(".config-cancel").addEventListener("click", () => 
+              $form.node(".config-cancel").on("click", () => 
                 self.hideConfigPanel()
               );
 
@@ -357,15 +434,21 @@ ${content}`;
                 self.refreshModels(config);
               });
             });
+
+          return form;
         }
 
-        function createResearchTab() {
-          return _node('form')
+        function createResearchTab(configModel) {
+          const form = _node('form')
             .attr({ className: "tab-content research-tab" })
             .html(`
               <div class="config-field">
                   <label>Research Goal:</label>
-                  <textarea id="research-goal">${self.config.research_goal || ""}</textarea>
+                  <textarea id="research-goal"></textarea>
+              </div>
+              <div class="config-field">
+                  <label>Stop Research</label>
+                  <button type="button" class="stop-research">Stop</button>
               </div>
               <div class="config-buttons">
                   <button type="button" class="research-save">Save</button>
@@ -375,22 +458,44 @@ ${content}`;
             .build(form => {
               const $form = _$(form);
 
-              $form.q(".research-save").addEventListener("click", () => {
-                self.researchGoal = $form.value("#research-goal");
-                self.saveResearchState();
-                if (self.researchGoal) {
-                  self.researchButton.show();
-                } else {
-                  self.researchButton.hide();
+              // Register handler to update form when model changes
+              const formUpdateHandler = (config) => {
+                $form.q("#research-goal").value = config.research_goal || "";
+              };
+              
+              configModel.addListener(formUpdateHandler);
+
+              // Initial form value
+              formUpdateHandler(configModel.getAll());
+
+              $form.node(".research-save").on("click", async () => {
+                configModel.removeListener(formUpdateHandler);
+                try {
+                  const researchGoal = $form.value("#research-goal");
+                  await configModel.update({ research_goal: researchGoal });
+                  self.hideConfigPanel();
+                } finally {
+                  configModel.addListener(formUpdateHandler);
                 }
-                self.hideConfigPanel();
               });
 
-              $form.q(".research-cancel").addEventListener("click", () => 
+              $form.node(".stop-research").on("click", async () => {
+                configModel.removeListener(formUpdateHandler);
+                try {
+                  await configModel.update({ research_goal: null });
+                  self.hideConfigPanel();
+                } finally {
+                  configModel.addListener(formUpdateHandler);
+                }
+              });
+
+              $form.node(".research-cancel").on("click", () => 
                 self.hideConfigPanel()
               );
             });
-        }        
+
+          return form;
+        }
       }
     }
 
@@ -407,26 +512,11 @@ ${content}`;
       this.userInputArea.style.display = "flex";
     }
 
-    async saveConfig(configParam) {
-      const newConfig = {
-        ...this.config,
-        ...configParam,
-      };
-
-      this.config = newConfig;
-      await GM.setValue("config", newConfig);
+    async saveConfig() {
       this.hideConfigPanel();
       this.addAssistantMessage("Configuration saved successfully!");
     }
 
-    async saveResearchState() {
-      const updatedConfig = {
-        ...this.config,
-        research_goal: this.researchGoal,
-      };
-      this.config = updatedConfig;
-      await GM.setValue("config", updatedConfig);
-    }
 
     showPanel(selection) {
       this.chatOverlay.classList.add("visible");
@@ -436,11 +526,11 @@ ${content}`;
       // If we have pending insights from research button, process them
       if (this.pendingInsights) {
         this.messageHistory.userMessage(
-          `Based on my research goal: "${this.researchGoal}", what insights can I gain from this page?`,
+          `Based on my research goal: "${this.configModel.get('research_goal')}", what insights can I gain from this page?`,
         );
         this.addAssistantMessage(
           "These are the insights I have gathered about this page based on my research goal: " +
-            this.researchGoal,
+            this.configModel.get('research_goal'),
         );
         this.addAssistantMessage(this.pendingInsights);
         this.addResearchNote(this.pendingInsights);
@@ -454,12 +544,12 @@ ${content}`;
 
       if (!selectedText) {
         if (
-          this.researchGoal &&
+          this.configModel.get('research_goal') &&
           !this.currentPageAnalyzed &&
           !this.researchModeAlertPrinted
         ) {
           this.addNoAiMessage(
-            `Research mode is active. Current goal: "${this.researchGoal}"\nTo analyze this page:\n1. Click the research button 🔍, or\n2. Type "/research-now"`,
+            `Research mode is active. Current goal: "${this.configModel.get('research_goal')}"\nTo analyze this page:\n1. Click the research button 🔍, or\n2. Type "/research-now"`,
           );
           this.researchModeAlertPrinted = true;
         }
@@ -467,7 +557,7 @@ ${content}`;
         return null;
       }
 
-      if (!this.researchGoal || this.currentPageAnalyzed) {
+      if (!this.configModel.get('research_goal') || this.currentPageAnalyzed) {
         this.messageHistory.userMessage(`
                     I have the following selected text and I may ask questions or discuss it.
                     ----
@@ -485,7 +575,7 @@ ${content}`;
     closePanel() {
       this.chatOverlay.classList.remove("visible");
       this.chatOpenButton.show();
-      if (this.researchGoal) {
+      if (this.configModel.get('research_goal')) {
         this.researchButton.show();
       }
     }
@@ -528,7 +618,7 @@ ${content}`;
     }
 
     async analyzePageForResearch() {
-      if (!this.researchGoal) {
+      if (!this.configModel.get('research_goal')) {
         this.addNoAiMessage(
           "Research mode is not active. Use /research <goal> to start research mode first.",
         );
@@ -537,14 +627,14 @@ ${content}`;
 
       const content = getPageContent();
       this.messageHistory.userMessage(
-        `Based on my research goal: "${this.researchGoal}", what insights can I gain from this page?`,
+        `Based on my research goal: "${this.configModel.get('research_goal')}", what insights can I gain from this page?`,
       );
       this.addAssistantMessage(
         "Analyzing the page content based on your research goal...",
       );
 
       try {
-        const response = await sendQuery(this.config, this.messageHistory);
+        const response = await sendQuery(this.configModel, this.messageHistory);
         return response.choices[0].message;
       } catch (error) {
         console.error("Error analyzing page:", error);
@@ -561,15 +651,6 @@ ${content}`;
       this.addUserMessage(userMessage);
       this.userInput.value = "";
 
-      if (!this.config.llm) {
-        this.config.llm = userMessage;
-        this.addAssistantMessage(
-          "I have selected the following LLM: " + this.config.llm,
-        );
-        this.messageHistory.init();
-        return;
-      }
-
       let query = userMessage;
       query = this.currentPreProcessPromptFunction(userMessage);
       if (!query) return;
@@ -585,13 +666,13 @@ ${content}`;
 
       try {
         messageHistory.userMessage(query);
-        const response = await sendQuery(this.config, messageHistory);
+        const response = await sendQuery(this.configModel, messageHistory);
 
         let content = await handleToolCalls(response.choices[0].message);
         this.addAssistantMessage(content);
 
         // If this is a research analysis, process it for research notes
-        if (isResearchAnalysis && this.researchGoal) {
+        if (isResearchAnalysis && this.configModel.get('research_goal')) {
           await this.addResearchNote(content);
         }
       } catch (error) {
@@ -609,7 +690,7 @@ ${content}`;
     }
 
     async refreshModels(configParam) {
-      if (!configParam) configParam = this.config;
+      if (!configParam) configParam = this.configModel.getAll();
       const modelSelect = this.configPanel.querySelector("#model-config");
       modelSelect.innerHTML = "<option>Loading...</option>";
       try {
@@ -630,7 +711,7 @@ ${content}`;
               textContent: m.id,
             })
             .build();
-          if (m.id === this.config.llm) {
+          if (m.id === this.configModel.get('llm')) {
             option.selected = true;
           }
           modelSelect.appendChild(option);
@@ -660,7 +741,7 @@ ${content}`;
           command: "/research-now",
           description: "Analyze current page for research",
           action: async () => {
-            if (!this.researchGoal) {
+            if (!this.configModel.get('research_goal')) {
               this.addNoAiMessage(
                 "Research mode is not active. Use /research <goal> to start research mode first.",
               );
@@ -682,8 +763,8 @@ ${content}`;
           action: () => {
             GM.deleteValue("config");
             GM.deleteValue("research_notes");
-            this.config = defaultConfig;
-            this.researchGoal = null;
+            this.configModel.update(defaultConfig);
+            this.configModel.set('research_goal', null);
             this.currentPageAnalyzed = false;
             this.researchNotes = [];
             initConfig(this);
@@ -716,11 +797,10 @@ ${content}`;
               );
               return null;
             }
-            this.researchGoal = goal;
+            this.configModel.set('research_goal', goal);
             this.currentPageAnalyzed = false;
             this.researchNotes = [];
             this.saveResearchNotes();
-            this.saveResearchState();
             this.researchButton.show();
             this.addNoAiMessage(
               `Research mode activated. Goal: "${goal}"\nI will analyze each page you visit based on this research goal.`,
@@ -730,29 +810,28 @@ ${content}`;
           acceptInput: (input) => input.startsWith("/research "),
         },
         {
-          command: "/stop_research",
+          command: "/stop-research",
           description: "Stop research mode",
           action: () => {
-            if (!this.researchGoal) {
+            if (!this.configModel.get('research_goal')) {
               this.addNoAiMessage("Research mode is not active.");
               return null;
             }
-            this.researchGoal = null;
+            this.configModel.set('research_goal', null);
             this.currentPageAnalyzed = false;
             this.researchNotes = [];
             this.saveResearchNotes();
-            this.saveResearchState();
             this.researchButton.hide();
             this.addNoAiMessage("Research mode deactivated.");
             return null;
           },
-          acceptInput: (input) => input === "/stop_research",
+          acceptInput: (input) => input === "/stop-research",
         },
         {
           command: "/reanalyze",
           description: "Re-analyze the current page",
           action: async () => {
-            if (!this.researchGoal) {
+            if (!this.configModel.get('research_goal')) {
               this.addNoAiMessage("Research mode is not active.");
               return null;
             }
@@ -764,7 +843,7 @@ ${content}`;
           command: "/notes",
           description: "Show collected research notes",
           action: () => {
-            if (!this.researchGoal) {
+            if (!this.configModel.get('research_goal')) {
               this.addNoAiMessage("Research mode is not active.");
               return null;
             }
@@ -778,7 +857,7 @@ ${content}`;
             const notRelevantCount =
               this.researchNotes.length - relevantNotes.length;
 
-            let message = `# Research Notes\nGoal: "${this.researchGoal}"\n\n`;
+            let message = `# Research Notes\nGoal: "${this.configModel.get('research_goal')}"\n\n`;
             message += `📊 Stats: ${relevantNotes.length} relevant pages found (${notRelevantCount} not relevant)\n\n`;
 
             if (relevantNotes.length > 0) {
@@ -857,21 +936,13 @@ ${content}`;
       this.dragStart = this.dragStart.bind(this);
       this.drag = this.drag.bind(this);
       this.dragEnd = this.dragEnd.bind(this);
-      this.handleEscape = this.handleEscape.bind(this);
 
       // Add event listeners
       this.button.addEventListener("mousedown", this.dragStart);
       document.addEventListener("mousemove", this.drag);
       document.addEventListener("mouseup", this.dragEnd);
-      document.addEventListener("keydown", this.handleEscape);
 
       this.shadowRoot.appendChild(this.button);
-    }
-
-    handleEscape(e) {
-      if (e.key === "Escape") {
-        CHAT_MODAL?.closePanel();
-      }
     }
 
     dragStart(e) {
@@ -1023,19 +1094,19 @@ ${content}`;
         `;
   }
 
-  async function sendQuery(config, messageHistory) {
+  async function sendQuery(configModel, messageHistory) {
     let req = {
-      model: config.llm,
+      model: configModel.get('llm'),
       stream: false,
       messages: messageHistory.getHistory(),
       //"tools": availableTools
     };
     
     let headers = {};
-    if (config.apiToken) {
-      headers["Authorization"] = `Bearer ${config.apiToken}`;
+    if (configModel.get('apiToken')) {
+      headers["Authorization"] = `Bearer ${configModel.get('apiToken')}`;
     }
-    const response = await fetch(`${config.chat_url}`, {
+    const response = await fetch(`${configModel.get('chat_url')}`, {
       method: "POST",
       headers: {
         ...headers,
@@ -1595,6 +1666,9 @@ ${content}`;
       qa: function (selector) {
         return target.querySelectorAll(selector);
       },
+      node: function (selector) { 
+        return _node(target.querySelector(selector))
+      }
     };
   }
 
@@ -1603,7 +1677,7 @@ ${content}`;
       el = document.createElement(el);
     } 
     else if (el.isWrapper) {
-      el = el.build();
+      return el
     }
     else if (!(el instanceof Element) && !(el instanceof ShadowRoot)) {
       console.error('Invalid element type:', el);
