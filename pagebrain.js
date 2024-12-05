@@ -182,7 +182,7 @@ ${content}`;
 
       try {
         this.messageHistory.userMessage(prompt);
-        const response = await sendQuery(this.configModel, this.messageHistory);
+        const response = await sendQueryToLLM(this.configModel, this.messageHistory);
         const aiMessage = response.choices[0].message.content.trim();
 
         // Try to extract JSON if it's wrapped in other text
@@ -251,6 +251,14 @@ ${content}`;
       }
 
       function userInputArea(self) {
+        const sendInputMessage = async (inputComponent) => { 
+          const userMessage = inputComponent.value.trim();
+          if (!userMessage) return;
+
+          self.addUserMessage(userMessage);
+          await self.sendMessage(userMessage);
+          inputComponent.value = "";
+        }
         const userInput = _node('textarea')
           .attr({
             className: "chat-input",
@@ -258,7 +266,7 @@ ${content}`;
           })
           .on("keypress", (e) => {
             if (e.key === "Enter" && !e.ctrlKey) {
-              self.sendMessage();
+              sendInputMessage(userInput);
               e.preventDefault();
             }
           })
@@ -269,16 +277,16 @@ ${content}`;
             className: "chat-send-btn",
             innerText: "Send"
           })
-          .on("click", () => self.sendMessage())
+          .on("click", () => sendInputMessage(userInput))
           .build();
-
-        self.userInput = userInput;
-        self.sendBtn = sendBtn;
 
         self.userInputArea = _node('div')
           .attr({ className: "chat-input-area" })
           .children(userInput, sendBtn)
           .build();
+
+        self.userInput = userInput;
+        self.sendBtn = sendBtn;
 
         return self.userInputArea;
       }
@@ -540,7 +548,6 @@ ${content}`;
       }
 
       let selectedText = selection?.toString();
-      console.log("Selected text: " + selectedText);
 
       if (!selectedText) {
         if (
@@ -634,7 +641,7 @@ ${content}`;
       );
 
       try {
-        const response = await sendQuery(this.configModel, this.messageHistory);
+        const response = await sendQueryToLLM(this.configModel, this.messageHistory);
         return response.choices[0].message;
       } catch (error) {
         console.error("Error analyzing page:", error);
@@ -643,38 +650,23 @@ ${content}`;
       }
     }
 
-    async sendMessage() {
-      const userMessage = this.userInput.value.trim();
-      console.log(userMessage);
-      if (!userMessage) return;
-
-      this.addUserMessage(userMessage);
-      this.userInput.value = "";
-
+    async sendMessage(userMessage) {
       let query = userMessage;
       query = this.currentPreProcessPromptFunction(userMessage);
       if (!query) return;
-
-      await this.sendChatMessage(query);
-    }
-
-    async sendChatMessage(query, isResearchAnalysis = false) {
+      
       this.userInput.disabled = true;
       this.sendBtn.disabled = true;
+
       const typingIndicator = createTypingIndicator();
       this.chatContent.appendChild(typingIndicator);
 
       try {
         messageHistory.userMessage(query);
-        const response = await sendQuery(this.configModel, messageHistory);
+        const response = await sendQueryToLLM(this.configModel, messageHistory);
 
         let content = await handleToolCalls(response.choices[0].message);
         this.addAssistantMessage(content);
-
-        // If this is a research analysis, process it for research notes
-        if (isResearchAnalysis && this.configModel.get('research_goal')) {
-          await this.addResearchNote(content);
-        }
       } catch (error) {
         console.error("Error:", error);
         this.addNoAiMessage("An error occurred: " + error.message);
@@ -683,8 +675,10 @@ ${content}`;
           this.chatContent.removeChild(typingIndicator);
         }
         this.scrollToBottom();
+
         this.userInput.disabled = false;
         this.sendBtn.disabled = false;
+
         this.userInput.focus();
       }
     }
@@ -1084,7 +1078,7 @@ ${content}`;
       "This is the current page content: \n" + getPageContent(),
     );
     return `
-        Summarize the page content, focus on the main story. Structure the summary as follows:
+        Summarize the page content, focus on the main story(s). Structure the summary as follows:
         - Add a short introduction about the general subject of the page
         - Create an outline of the main topics, similar to a table of contents
         - Explore the main topics shortly as bullet points with a short explanation of each topic
@@ -1094,7 +1088,7 @@ ${content}`;
         `;
   }
 
-  async function sendQuery(configModel, messageHistory) {
+  async function sendQueryToLLM(configModel, messageHistory) {
     let req = {
       model: configModel.get('llm'),
       stream: false,
