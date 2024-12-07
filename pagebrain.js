@@ -96,7 +96,8 @@
               headerArea(this),
               configPanel(this),
               chatMessageArea(this),
-              userInputArea(this)
+              userInputArea(this),
+              statusBar(this)
             )
           )
       )
@@ -363,6 +364,15 @@
           return form;
         }
       }
+
+      function statusBar(self) {
+        return self.statusBar = _node('div')
+          .attr({ 
+            className: "status-bar",
+            innerHTML: "Ready"
+          })
+          .build();
+      }
     }
 
     showConfigPanel() {
@@ -381,6 +391,7 @@
     async saveConfig() {
       this.hideConfigPanel();
       this.addAssistantMessage("Configuration saved successfully!");
+      this.setStatus('Configuration saved', 'success');
     }
 
 
@@ -481,7 +492,6 @@
         return null;
       }
 
-      const content = getPageContent();
       this.messageHistory.userMessage(
         `Based on my research goal: "${this.configModel.get('research_goal')}", what insights can I gain from this page?`,
       );
@@ -502,6 +512,10 @@
     async sendMessage(userMessage) {
       let query = this.currentPreProcessPromptFunction(userMessage);
       if (!query) return;
+      if (query instanceof Promise) {
+        query = await query;
+      }
+      if (!query) return;
       
       this.userInput.disabled = true;
       this.sendBtn.disabled = true;
@@ -516,8 +530,8 @@
         let content = await handleToolCalls(response.choices[0].message);
         this.addAssistantMessage(content);
       } catch (error) {
-        console.error("Error:", error);
-        this.addNoAiMessage("An error occurred: " + error.message);
+        console.error('Error sending message: ' + query, error);
+        this.setStatus('Error sending message: ' + error.message, 'error');
       } finally {
         if (this.chatContent.contains(typingIndicator)) {
           this.chatContent.removeChild(typingIndicator);
@@ -561,25 +575,20 @@
       } catch (error) {
         console.error("Error fetching models:", error);
         modelSelect.innerHTML = "<option>Error loading models</option>";
+        this.setStatus('Error loading models: ' + error.message, 'error');
       }
     }
 
-    async summarizePrompt(messageHistory) {
+    async summarizePrompt() {
       const overview = await this.overviewAgent.process(getPageContent(), (message) => {
-        this.addNoAiMessage(message);
+        this.setStatus(message);
+      }, (error) => {
+        console.error('Error during overview generation: ' + error.message);
+        this.setStatus('Error during overview generation: ' + error.message, 'error');
       });
       
       this.addAssistantMessage(overview);
       return null
-      // return `
-      //     Based on the overview provided above, structure the information as follows:
-      //     - Add a short introduction about the general subject of the page
-      //     - Create an outline of the main topics, similar to a table of contents
-      //     - Explore the main topics shortly as bullet points with a short explanation of each topic
-      //     - If a topic is about an external story, include a link to the story, use markdown links
-      //     - When creating outlines, don't add empty topics and don't add duplicate topics
-      //     - Ignore content that is part of structure and navigation, such as headers, menus, footers, etc.
-      //     `;
     }
 
     currentPreProcessPromptFunction(userInput) {
@@ -738,6 +747,18 @@
         "Unknown command. Type /help for a list of available commands.",
       );
       return null;
+    }
+
+    setStatus(message, type = 'info') {
+      const icons = {
+        info: 'ℹ️',
+        error: '⚠️',
+        warning: '⚡',
+        success: '✅'
+      };
+      
+      this.statusBar.innerHTML = `${icons[type]} ${message}`;
+      this.statusBar.className = `status-bar status-${type}`;
     }
   }
 
@@ -929,23 +950,6 @@
     }
   }
 
-  function summarizePrompt(messageHistory) {
-    return this.overviewAgent.process(getPageContent(), (message) => {
-      this.addNoAiMessage(message);
-    });
-    // messageHistory.userMessage(
-    //   "This is the current page content: \n" + getPageContent(),
-    // );
-    // return `
-    //     Summarize the page content, focus on the main story(s). Structure the summary as follows:
-    //     - Add a short introduction about the general subject of the page
-    //     - Create an outline of the main topics, similar to a table of contents
-    //     - Explore the main topics shortly as bullet points with a short explanation of each topic
-    //     - If a topic is about an external story, include a link to the story, use markdown links
-    //     - When creating outlines, dont add empty topics and dont add duplicate topics
-    //     - Ignore content that is part of structure and navigation, such as headers, menus, footers, etc.
-    //     `;
-  }
 
   function ignoreKeyStrokesWhenInputHasFocus(shadowRoot, inputElement) {
     function stopPropagation(e) {
@@ -1387,6 +1391,45 @@
                 margin: 0;
                 cursor: pointer;
             }
+
+            .status-bar {
+                padding: 8px 15px;
+                background-color: #f8f9fa;
+                border-top: 1px solid #e0e0e0;
+                color: #666;
+                font-size: 12px;
+                text-align: left;
+                border-radius: 0 0 8px 8px;
+                flex-shrink: 0;
+                display: flex;
+                align-items: center;
+                height: 20px;
+            }
+
+            // Update chat-content max-height to account for status bar
+            .chat-content {
+                max-height: calc(85vh - 180px);
+            }
+
+            .status-bar.status-error {
+                color: #dc3545;
+                background-color: #fff5f5;
+            }
+
+            .status-bar.status-warning {
+                color: #856404;
+                background-color: #fff3cd;
+            }
+
+            .status-bar.status-success {
+                color: #28a745;
+                background-color: #f4fff5;
+            }
+
+            .status-bar.status-info {
+                color: #666;
+                background-color: #f8f9fa;
+            }
         `)
       .build();
     shadowRoot.appendChild(style);
@@ -1576,7 +1619,7 @@ class OverviewAgent {
      * @param {function} progressCallback - Callback for progress updates
      * @returns {Promise<string>} The generated overview
      */
-    async process(content, progressCallback = () => {}) {
+    async process(content, progressCallback = () => {}, errorCallback = () => {}) {
         try {
             // Split content into chunks
             const chunks = this._splitIntoChunks(content);
@@ -1604,11 +1647,12 @@ class OverviewAgent {
             );
             
             const response = await sendQueryToLLM(this.configModel, history);
+            progressCallback('Overview generated');
             return response.choices[0].message.content;
 
         } catch (error) {
-            console.error('Error in OverviewAgent:', error);
-            throw error;
+          errorCallback('Error during overview generation: ' + error.message);
+          throw error;
         }
     }
 }
