@@ -11,6 +11,7 @@
 // @grant        GM.getValue
 // @grant        GM.deleteValue
 // @require      https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js
+// @require      https://unpkg.com/turndown/dist/turndown.js
 // ==/UserScript==
 (async function () {
   "use strict";
@@ -18,59 +19,8 @@
   let CHAT_MODAL = null;
   let messageHistory = null;
 
-  const defaultConfig = {
-    llm: null,
-    prompt: `You are a helpful assistant with the ability to answer questions about the current page content.`,
-    chat_url: "http://localhost:11434/v1/chat/completions",
-    models_url: "http://localhost:11434/v1/models",
-    research_mode: false,
-    research_goal: null,
-  };
-
-  class ConfigModel {
-    constructor(initialConfig) {
-      this.config = { ...initialConfig };
-      this.listeners = new Set();
-    }
-
-    addListener(listener) {
-      this.listeners.add(listener);
-    }
-
-    removeListener(listener) {
-      this.listeners.delete(listener);
-    }
-
-    async set(key, value) {
-      await this.update({...this.config, [key]: value });
-    }
-
-    async update(changes) {
-      const newConfig = { ...this.config, ...changes };
-      if (JSON.stringify(newConfig) !== JSON.stringify(this.config)) {
-        this.config = newConfig;
-        await GM.setValue("config", newConfig);
-        this.notifyListeners();
-      }
-    }
-
-    get(key) {
-      return this.config[key];
-    }
-
-    getAll() {
-      return { ...this.config };
-    }
-
-    notifyListeners() {
-      for (const listener of this.listeners) {
-        listener(this.config);
-      }
-    }
-  }
-
   async function main() {
-    const storedConfig = await GM.getValue("config", defaultConfig);
+    const storedConfig = await GM.getValue("config", null);
     const configModel = new ConfigModel(storedConfig);
     messageHistory = new ChatHistory(configModel);
 
@@ -78,11 +28,13 @@
     addStyling(theShadowRoot);
     addTypingStyle(theShadowRoot);
     let assistantButton = new AssistantButton(theShadowRoot);
+    let researchNotes = await GM.getValue("research_notes", []);
     CHAT_MODAL = new ChatModal(
       theShadowRoot,
       assistantButton,
       messageHistory,
       configModel,
+      new ResearchNotesModel(researchNotes)
     );
     if (!configModel.get('llm')) {
       initConfig(CHAT_MODAL);
@@ -91,50 +43,19 @@
     messageHistory.init();
   }
 
-  class ChatHistory {
-    constructor(configModel) {
-      this.history = [];
-      this.configModel = configModel;
-    }
-
-    init() {
-      this.history = [{ role: "system", content: this.configModel.get('prompt') }];
-      this.configModel.addListener((config) => {
-        this.history.push({ role: "system", content: config.prompt });
-      });
-      this.userMessage(
-        "This is the current page content: \n" + getPageContent(),
-      );
-    }
-
-    aiMessage(message) {
-      this.history.push({ role: "assistant", content: message });
-    }
-
-    userMessage(message) {
-      this.history.push({ role: "user", content: message });
-    }
-
-    lastMessage() {
-      return this.history[this.history.length - 1];
-    }
-    getHistory() {
-      return this.history;
-    }
-  }
   class ChatModal {
-    constructor(shadowRoot, chatOpenButton, messageHistory, configModel) {
+    constructor(shadowRoot, chatOpenButton, messageHistory, configModel, researchNotesModel) {
       this.messageHistory = messageHistory;
       this.configModel = configModel;
       this.chatOpenButton = chatOpenButton;
       this.createElements(shadowRoot);
-      this.currentPreProcessPromptFunction = this.defaultPreProcessPrompt;
       this.currentPageAnalyzed = false;
-      this.researchNotes = [];
+      this.researchNotes = researchNotesModel;
+      this.researchAgent = new ResearchAgent(configModel,this.researchNotes)
       this.pendingInsights = null;
       this.researchButton = new ResearchButton(shadowRoot, this);
-
-      this.loadResearchNotes();
+      this.overviewAgent = new OverviewAgent(configModel);
+      
       document.addEventListener("keydown", (e) => {
         if (e.key === "Escape") {
           this.closePanel();
@@ -159,74 +80,12 @@
       }
     }
 
-    async loadResearchNotes() {
-      this.researchNotes = await GM.getValue("research_notes", []);
-    }
+    async doResearch(content) {
+      if (this.researchAgent.isAnalysisRequired())
+        return
 
-    async saveResearchNotes() {
-      await GM.setValue("research_notes", this.researchNotes);
-    }
-
-    async addResearchNote(content) {
-      const currentUrl = window.location.href;
-      const prompt = `You must respond ONLY with a JSON object in the following format, with NO additional text before or after:
-{
-    "summary": "a very brief summary of the page (max 50 words)",
-    "isRelevant": true or false (boolean value, no quotes)
-}
-
-Analyze the following insights about a webpage in relation to the research goal: "${this.configModel.get('research_goal')}"
-
-Insights to analyze:
-${content}`;
-
-      try {
-        this.messageHistory.userMessage(prompt);
-        const response = await sendQueryToLLM(this.configModel, this.messageHistory);
-        const aiMessage = response.choices[0].message.content.trim();
-
-        // Try to extract JSON if it's wrapped in other text
-        let jsonStr = aiMessage;
-        const jsonMatch = aiMessage.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          jsonStr = jsonMatch[0];
-        }
-
-        let analysis;
-        analysis = JSON.parse(jsonStr);
-
-        // Validate the required fields
-        if (typeof analysis.summary !== "string" || typeof analysis.isRelevant !== "boolean") {
-          this.addNoAiMessage("Failed to parse AI response as JSON");
-          return
-        }
-
-        const note = {
-          url: currentUrl,
-          summary: analysis.summary,
-          insights: content,
-          isRelevant: analysis.isRelevant,
-          timestamp: new Date().toISOString(),
-        };
-
-        this.researchNotes.push(note);
-        await this.saveResearchNotes();
-
-        // Add a message about the page's relevance
-        const relevanceMsg = analysis.isRelevant
-          ? "✅ This page has been added to your research notes."
-          : "❌ This page was analyzed but deemed not relevant to your research goal.";
-        this.addNoAiMessage(relevanceMsg);
-      } catch (error) {
-        console.error("Error processing research note:", error);
-        console.error("AI response:", error.aiResponse);
-        this.addNoAiMessage(
-          "⚠️ Error processing research note. The page was analyzed but couldn't be added to research notes." +
-            "Check the console for more insights.",
-        );
-        // Reset the currentPageAnalyzed flag so user can try again
-        this.currentPageAnalyzed = false;
-      }
+      let response = await this.researchAgent.analyzePageForResearch(content, this.messageHistory);
+      this.addNoAiMessage(response)
     }
 
     createElements(shadowRoot) {
@@ -256,8 +115,8 @@ ${content}`;
           if (!userMessage) return;
 
           self.addUserMessage(userMessage);
-          await self.sendMessage(userMessage);
           inputComponent.value = "";
+          await self.sendMessage(userMessage);
         }
         const userInput = _node('textarea')
           .attr({
@@ -379,7 +238,7 @@ ${content}`;
               </div>
               <div class="config-field">
                   <label>Api Token:</label>
-                  <input type="password" id="api-token">
+                  <input type="password" id="api-token" autocomplete="off">
               </div>
               <div class="config-field">
                   <label>Model:</label>
@@ -401,7 +260,6 @@ ${content}`;
                 $form.q("#prompt-config").value = config.prompt || "";
                 $form.q("#chat-url-config").value = config.chat_url || "";
                 $form.q("#models-url-config").value = config.models_url || "";
-                $form.q("#api-token").value = config.apiToken || "";
                 $form.q("#model-config").value = config.llm || "";
               };
               
@@ -530,49 +388,40 @@ ${content}`;
       this.chatOverlay.classList.add("visible");
       this.chatOpenButton.hide();
       this.researchButton.hide();
+      let researchGoal = this.configModel.get('research_goal');
 
       // If we have pending insights from research button, process them
       if (this.pendingInsights) {
         this.messageHistory.userMessage(
-          `Based on my research goal: "${this.configModel.get('research_goal')}", what insights can I gain from this page?`,
+          `Based on my research goal: "${researchGoal}", what insights can I gain from this page?`,
         );
         this.addAssistantMessage(
           "These are the insights I have gathered about this page based on my research goal: " +
-            this.configModel.get('research_goal'),
+            researchGoal,
         );
         this.addAssistantMessage(this.pendingInsights);
-        this.addResearchNote(this.pendingInsights);
+        this.doResearch(this.pendingInsights);
         this.pendingInsights = null;
-        this.currentPageAnalyzed = true;
+        this.userInput.focus();
         return;
+      }
+      if (this.researchAgent.isAnalysisRequired() && ! this.researchModeAlertPrinted) {
+        this.addNoAiMessage(
+          `Research mode is active. Current goal: "${researchGoal}"\nTo analyze this page:\n1. Click the research button 🔍, or\n2. Type "/research-now"`,
+        );
+        this.researchModeAlertPrinted = true;
       }
 
       let selectedText = selection?.toString();
-
-      if (!selectedText) {
-        if (
-          this.configModel.get('research_goal') &&
-          !this.currentPageAnalyzed &&
-          !this.researchModeAlertPrinted
-        ) {
-          this.addNoAiMessage(
-            `Research mode is active. Current goal: "${this.configModel.get('research_goal')}"\nTo analyze this page:\n1. Click the research button 🔍, or\n2. Type "/research-now"`,
-          );
-          this.researchModeAlertPrinted = true;
-        }
-        this.userInput.focus();
-        return null;
-      }
-
-      if (!this.configModel.get('research_goal') || this.currentPageAnalyzed) {
+      if (selectedText) {
         this.messageHistory.userMessage(`
-                    I have the following selected text and I may ask questions or discuss it.
+                    I have selected the following text and I may ask questions or discuss it.
                     ----
                     ${selectedText}
                     ----
                     `);
 
-        this.addAssistantMessage(
+        this.addNoAiMessage(
           `You have selected text. Feel free to ask questions or discuss it.`,
         );
       }
@@ -651,8 +500,7 @@ ${content}`;
     }
 
     async sendMessage(userMessage) {
-      let query = userMessage;
-      query = this.currentPreProcessPromptFunction(userMessage);
+      let query = this.currentPreProcessPromptFunction(userMessage);
       if (!query) return;
       
       this.userInput.disabled = true;
@@ -662,8 +510,8 @@ ${content}`;
       this.chatContent.appendChild(typingIndicator);
 
       try {
-        messageHistory.userMessage(query);
-        const response = await sendQueryToLLM(this.configModel, messageHistory);
+        this.messageHistory.userMessage(query);
+        const response = await sendQueryToLLM(this.configModel, this.messageHistory);
 
         let content = await handleToolCalls(response.choices[0].message);
         this.addAssistantMessage(content);
@@ -716,7 +564,25 @@ ${content}`;
       }
     }
 
-    defaultPreProcessPrompt(userInput) {
+    async summarizePrompt(messageHistory) {
+      const overview = await this.overviewAgent.process(getPageContent(), (message) => {
+        this.addNoAiMessage(message);
+      });
+      
+      this.addAssistantMessage(overview);
+      return null
+      // return `
+      //     Based on the overview provided above, structure the information as follows:
+      //     - Add a short introduction about the general subject of the page
+      //     - Create an outline of the main topics, similar to a table of contents
+      //     - Explore the main topics shortly as bullet points with a short explanation of each topic
+      //     - If a topic is about an external story, include a link to the story, use markdown links
+      //     - When creating outlines, don't add empty topics and don't add duplicate topics
+      //     - Ignore content that is part of structure and navigation, such as headers, menus, footers, etc.
+      //     `;
+    }
+
+    currentPreProcessPromptFunction(userInput) {
       const input = userInput.toLowerCase().trim();
       const commands = [
         {
@@ -748,19 +614,15 @@ ${content}`;
         {
           command: "/overview",
           description: "Get an overview of the page content",
-          action: () => summarizePrompt(),
+          action: () => { return this.summarizePrompt() },
           acceptInput: (input) => input === "/overview",
         },
         {
           command: "/reset",
           description: "Reset all settings and research data",
           action: () => {
-            GM.deleteValue("config");
-            GM.deleteValue("research_notes");
-            this.configModel.update(defaultConfig);
-            this.configModel.set('research_goal', null);
-            this.currentPageAnalyzed = false;
-            this.researchNotes = [];
+            this.configModel.reset()
+            this.researchNotes.reset()
             initConfig(this);
             this.addNoAiMessage(
               "All settings and research data have been reset.",
@@ -770,14 +632,14 @@ ${content}`;
           acceptInput: (input) => input === "/reset",
         },
         {
-          command: "/reset_history",
+          command: "/reset-history",
           description: "Reset the chat history",
           action: () => {
             this.messageHistory.init();
             this.addNoAiMessage("Chat history has been reset.");
             return null;
           },
-          acceptInput: (input) => input === "/reset_history",
+          acceptInput: (input) => input === "/reset-history",
         },
         {
           command: "/research",
@@ -791,10 +653,7 @@ ${content}`;
               );
               return null;
             }
-            this.configModel.set('research_goal', goal);
-            this.currentPageAnalyzed = false;
-            this.researchNotes = [];
-            this.saveResearchNotes();
+            this.researchNotes.reset()
             this.researchButton.show();
             this.addNoAiMessage(
               `Research mode activated. Goal: "${goal}"\nI will analyze each page you visit based on this research goal.`,
@@ -811,10 +670,7 @@ ${content}`;
               this.addNoAiMessage("Research mode is not active.");
               return null;
             }
-            this.configModel.set('research_goal', null);
-            this.currentPageAnalyzed = false;
-            this.researchNotes = [];
-            this.saveResearchNotes();
+            this.researchNotes.reset();
             this.researchButton.hide();
             this.addNoAiMessage("Research mode deactivated.");
             return null;
@@ -841,7 +697,7 @@ ${content}`;
               this.addNoAiMessage("Research mode is not active.");
               return null;
             }
-            if (this.researchNotes.length === 0) {
+            if (this.researchNotes.empty()) {
               this.addNoAiMessage("No research notes collected yet.");
               return null;
             }
@@ -849,7 +705,7 @@ ${content}`;
               (note) => note.isRelevant,
             );
             const notRelevantCount =
-              this.researchNotes.length - relevantNotes.length;
+              this.researchNotes.count() - relevantNotes.length;
 
             let message = `# Research Notes\nGoal: "${this.configModel.get('research_goal')}"\n\n`;
             message += `📊 Stats: ${relevantNotes.length} relevant pages found (${notRelevantCount} not relevant)\n\n`;
@@ -1073,90 +929,22 @@ ${content}`;
     }
   }
 
-  function summarizePrompt() {
-    messageHistory.userMessage(
-      "This is the current page content: \n" + getPageContent(),
-    );
-    return `
-        Summarize the page content, focus on the main story(s). Structure the summary as follows:
-        - Add a short introduction about the general subject of the page
-        - Create an outline of the main topics, similar to a table of contents
-        - Explore the main topics shortly as bullet points with a short explanation of each topic
-        - If a topic is about an external story, include a link to the story, use markdown links
-        - When creating outlines, dont add empty topics and dont add duplicate topics
-        - Draw no conclusions, just write the summary
-        `;
-  }
-
-  async function sendQueryToLLM(configModel, messageHistory) {
-    let req = {
-      model: configModel.get('llm'),
-      stream: false,
-      messages: messageHistory.getHistory(),
-      //"tools": availableTools
-    };
-    
-    let headers = {};
-    if (configModel.get('apiToken')) {
-      headers["Authorization"] = `Bearer ${configModel.get('apiToken')}`;
-    }
-    const response = await fetch(`${configModel.get('chat_url')}`, {
-      method: "POST",
-      headers: {
-        ...headers,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(req),
+  function summarizePrompt(messageHistory) {
+    return this.overviewAgent.process(getPageContent(), (message) => {
+      this.addNoAiMessage(message);
     });
-    if (response.ok) return await response.json();
-
-    if (response.status === 401)
-      throw new Error("Unauthorized, invalid API token");
-
-    if (response.status === 403)
-      throw new Error("Forbidden, check your API token");
-
-    if (response.status >= 400 && response.status < 500) {
-      let errorMessage = await response.json();
-      throw new Error(errorMessage.error.message);
-    }
-    throw new Error(
-      "Failed to communicate with LLM!! \n" + response.statusText,
-    );
-  }
-
-  function getPageContent() {
-    // Create a temporary div to hold the page content
-    const tempDiv = _node('div')
-      .html(document.body.innerHTML)
-      .build();
-
-    // Remove all script and style tags
-    const scriptsAndStyles = tempDiv.querySelectorAll("script, style");
-    scriptsAndStyles.forEach((element) => element.remove());
-
-    // Function to process a node and its children
-    function processNode(node) {
-      if (node.nodeType === Node.ELEMENT_NODE) {
-        // If it's a link, preserve it
-        if (node.tagName === "A" && node.href) {
-          return `[${node.textContent}](${node.href}) `;
-        }
-
-        // For other elements, process their children
-        let text = "";
-        for (let child of node.childNodes) {
-          text += processNode(child);
-        }
-        return text;
-      } else if (node.nodeType === Node.TEXT_NODE) {
-        // Return text content for text nodes
-        return node.textContent;
-      }
-      return "";
-    }
-
-    return processNode(tempDiv);
+    // messageHistory.userMessage(
+    //   "This is the current page content: \n" + getPageContent(),
+    // );
+    // return `
+    //     Summarize the page content, focus on the main story(s). Structure the summary as follows:
+    //     - Add a short introduction about the general subject of the page
+    //     - Create an outline of the main topics, similar to a table of contents
+    //     - Explore the main topics shortly as bullet points with a short explanation of each topic
+    //     - If a topic is about an external story, include a link to the story, use markdown links
+    //     - When creating outlines, dont add empty topics and dont add duplicate topics
+    //     - Ignore content that is part of structure and navigation, such as headers, menus, footers, etc.
+    //     `;
   }
 
   function ignoreKeyStrokesWhenInputHasFocus(shadowRoot, inputElement) {
@@ -1321,7 +1109,6 @@ ${content}`;
                 cursor: pointer;
                 color: #666;
                 border-radius: 8px;
-                margin-right: 10px;
             }
 
             .config-button:hover {
@@ -1734,3 +1521,376 @@ ${content}`;
 
   main();
 })();
+
+class OverviewAgent {
+    constructor(configModel, options = {}) {
+        this.configModel = configModel;
+        this.options = {
+            chunkSize: 2000,  // characters per chunk
+            chunkOverlap: 200,  // characters of overlap between chunks
+            ...options
+        };
+    }
+
+    /**
+     * Split text into overlapping chunks
+     * @private
+     */
+    _splitIntoChunks(text) {
+        const chunks = [];
+        let currentIndex = 0;
+        
+        while (currentIndex < text.length) {
+            const chunkEnd = Math.min(currentIndex + this.options.chunkSize, text.length);
+            let chunk = text.substring(currentIndex, chunkEnd);
+            
+            // If this isn't the last chunk, try to break at a sentence or paragraph
+            if (chunkEnd < text.length) {
+                const breakPoints = [
+                    chunk.lastIndexOf('\n\n'),  // paragraph
+                    chunk.lastIndexOf('. '),    // sentence
+                    chunk.lastIndexOf('? '),    // question
+                    chunk.lastIndexOf('! ')     // exclamation
+                ].filter(point => point !== -1);
+                
+                if (breakPoints.length > 0) {
+                    const breakPoint = Math.max(...breakPoints);
+                    chunk = chunk.substring(0, breakPoint + 1);
+                    currentIndex += breakPoint + 1;
+                } else {
+                    currentIndex += chunk.length;
+                }
+            } else {
+                currentIndex = text.length;
+            }
+            
+            chunks.push(chunk.trim());
+        }
+        
+        return chunks;
+    }
+
+    /**
+     * Process content and generate overview with progress reporting
+     * @param {string} content - The page content to analyze
+     * @param {function} progressCallback - Callback for progress updates
+     * @returns {Promise<string>} The generated overview
+     */
+    async process(content, progressCallback = () => {}) {
+        try {
+            // Split content into chunks
+            const chunks = this._splitIntoChunks(content);
+            progressCallback(`Split content into ${chunks.length} chunks`);
+
+            // Process each chunk
+            const chunkSummaries = [];
+            for (let i = 0; i < chunks.length; i++) {
+                progressCallback(`Processing chunk ${i + 1} of ${chunks.length}`);
+                
+                const history = new ChatHistory(this.configModel);
+                history.userMessage("Please provide a concise summary of the following text segment. Focus on the main points and key information: \n\n" + chunks[i]);
+                
+                const response = await sendQueryToLLM(this.configModel, history);
+                const summary = response.choices[0].message.content;
+                chunkSummaries.push(summary);
+            }
+
+            // Combine summaries
+            progressCallback('Generating final overview...');
+            const history = new ChatHistory(this.configModel);
+            history.userMessage(
+                "Please combine these summaries into a coherent overview. Organize the information logically and remove any redundancies:\n\n" + 
+                chunkSummaries.join('\n\n')
+            );
+            
+            const response = await sendQueryToLLM(this.configModel, history);
+            return response.choices[0].message.content;
+
+        } catch (error) {
+            console.error('Error in OverviewAgent:', error);
+            throw error;
+        }
+    }
+}
+
+function getPageContent() {
+    return getPageContentNaive();
+}
+
+class ConfigModel {
+  constructor(initialConfig) {
+  const defaultConfig = {
+      llm: null,
+      prompt: `You are a helpful assistant with the ability to answer questions about the current page content.`,
+      chat_url: "http://localhost:11434/v1/chat/completions",
+      models_url: "http://localhost:11434/v1/models",
+      research_mode: false,
+      research_goal: null,
+    };      
+    this.config = initialConfig || defaultConfig;
+    this.listeners = new Set();
+  }
+
+  addListener(listener) {
+    this.listeners.add(listener);
+  }
+
+  removeListener(listener) {
+    this.listeners.delete(listener);
+  }
+
+  async reset() {
+    await this.update(defaultConfig);
+  }
+
+  async set(key, value) {
+    await this.update({...this.config, [key]: value });
+  }
+
+  async update(changes) {
+    const newConfig = { ...this.config, ...changes };
+    if (JSON.stringify(newConfig) !== JSON.stringify(this.config)) {
+      this.config = newConfig;
+      await GM.setValue("config", newConfig);
+      this.notifyListeners();
+    }
+  }
+
+  get(key) {
+    return this.config[key];
+  }
+
+  getAll() {
+    return { ...this.config };
+  }
+
+  notifyListeners() {
+    for (const listener of this.listeners) {
+      listener(this.config);
+    }
+  }
+}
+
+class ResearchAgent {
+  constructor(configModel, researchNotesModel) {
+    this.researchNotesModel = researchNotesModel;
+    this.currentPageAnalyzed = false;
+    this.configModel = configModel;
+  }
+
+  isAnalysisRequired() {
+    return ! this.currentPageAnalyzed && this.configModel.get('research_goal');
+  }
+
+  async analyzePageForResearch(content, messageHistory) {
+
+    const currentUrl = window.location.href;
+    const prompt = `You must respond ONLY with a JSON object in the following format, with NO additional text before or after:
+{
+    "summary": "a very brief summary of the page (max 50 words)",
+    "isRelevant": true or false (boolean value, no quotes)
+}
+
+Analyze the following insights about a webpage in relation to the research goal: "${this.configModel.get('research_goal')}"
+
+Insights to analyze:
+${content}`;
+
+    try {
+      messageHistory.userMessage(prompt);
+      const response = await sendQueryToLLM(this.configModel, messageHistory);
+      const aiMessage = response.choices[0].message.content.trim();
+
+      // Try to extract JSON if it's wrapped in other text
+      let jsonStr = aiMessage;
+      const jsonMatch = aiMessage.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        jsonStr = jsonMatch[0];
+      }
+
+      let analysis = JSON.parse(jsonStr);
+
+      // Validate the required fields
+      if (typeof analysis.summary !== "string" || typeof analysis.isRelevant !== "boolean") {
+        return "Failed to parse AI response as JSON"
+      }
+
+      const note = {
+        url: currentUrl,
+        summary: analysis.summary,
+        insights: content,
+        isRelevant: analysis.isRelevant,
+        timestamp: new Date().toISOString(),
+      };
+
+      await this.researchNotes.addNote(note);
+
+      this.currentPageAnalyzed = true;
+
+      // Add a message about the page's relevance
+      return analysis.isRelevant
+        ? "✅ This page has been added to your research notes."
+        : "❌ This page was analyzed but deemed not relevant to your research goal.";
+    } catch (error) {
+      console.error("Error processing research note:", error);
+      console.error("AI response:", error.aiResponse);
+      return "⚠️ Error processing research note. The page was analyzed but couldn't be added to research notes." +
+        "Check the console for more insights.";
+    }
+  }
+}
+
+class ResearchNotesModel {
+  constructor(researchNotes) {
+    this.notes = researchNotes;
+  }
+
+  async addNote(note) {
+    this.notes.push(note);
+    await this.persist();
+  }
+
+  getNotes() {
+    return this.notes;
+  }
+  
+  async persist() {
+    await GM.setValue("research_notes", this.notes);
+  }
+
+  empty() {
+    return this.notes.length === 0; 
+  }
+
+  filter(predicate) {
+    return this.notes.filter(predicate);
+  }
+
+  count() {
+    return this.notes.length;
+  }
+  
+  async reset() {
+    this.notes = [];
+    await this.persist();
+  }
+}
+
+class ChatHistory {
+  constructor(configModel) {
+    this.history = [];
+    this.configModel = configModel;
+  }
+
+  init() {
+    this.history = [{ role: "system", content: this.configModel.get('prompt') }];
+    this.configModel.addListener((config) => {
+      this.history.push({ role: "system", content: config.prompt });
+    });
+    this.userMessage(
+      "This is the current page content: \n" + getPageContent(),
+    );
+  }
+
+  aiMessage(message) {
+    this.history.push({ role: "assistant", content: message });
+  }
+
+  userMessage(message) {
+    this.history.push({ role: "user", content: message });
+  }
+
+  lastMessage() {
+    return this.history[this.history.length - 1];
+  }
+  getHistory() {
+    return this.history;
+  }
+}
+
+function getPageContent() {
+  return getPageContentNaive();
+}
+
+function getPageContentAsMarkdown() {
+  var turndownService = new TurndownService()
+  return turndownService.turndown(document.body);
+}
+
+
+function getPageContentNaive() {
+  const article = document.querySelector("article");
+  if (article) {
+    return article.innerText;
+  }
+
+  // If no article tag is found, try to get content from the main tag
+  const main = document.querySelector("main");
+  if (main) {
+    return main.innerText;
+  }
+
+  // If no main tag is found, try to get content from the body tag
+  // but exclude certain elements that typically don't contain main content
+  const body = document.body;
+  const elementsToExclude = [
+    "header",
+    "footer",
+    "nav",
+    "script",
+    "style",
+    "iframe",
+    "noscript",
+  ];
+
+  // Create a temporary div to hold the body content
+  const tempDiv = document.createElement("div");
+  tempDiv.innerHTML = body.innerHTML;
+
+  // Remove excluded elements
+  elementsToExclude.forEach((tag) => {
+    const elements = tempDiv.getElementsByTagName(tag);
+    for (let i = elements.length - 1; i >= 0; i--) {
+      elements[i].parentNode.removeChild(elements[i]);
+    }
+  });
+
+  return tempDiv.innerText;
+}
+
+async function sendQueryToLLM(configModel, messageHistory) {
+  let req = {
+    model: configModel.get('llm'),
+    stream: false,
+    messages: messageHistory.getHistory(),
+    //"tools": availableTools
+  };
+  
+  let headers = {};
+  if (configModel.get('apiToken')) {
+    headers["Authorization"] = `Bearer ${configModel.get('apiToken')}`;
+  }
+  const response = await fetch(`${configModel.get('chat_url')}`, {
+    method: "POST",
+    headers: {
+      ...headers,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(req),
+  });
+  if (response.ok) return await response.json();
+
+  if (response.status === 401)
+    throw new Error("Unauthorized, invalid API token");
+
+  if (response.status === 403)
+    throw new Error("Forbidden, check your API token");
+
+  if (response.status >= 400 && response.status < 500) {
+    let errorMessage = await response.json();
+    throw new Error(errorMessage.error.message);
+  }
+  throw new Error(
+    "Failed to communicate with LLM!! \n" + response.statusText,
+  );
+}
