@@ -1620,6 +1620,37 @@ class OverviewAgent {
      * @returns {Promise<string>} The generated overview
      */
     async process(content, progressCallback = () => {}, errorCallback = () => {}) {
+      let overviewResult = this.processSingleChunkStrategy(content, progressCallback, errorCallback);
+      if (overviewResult) return overviewResult;
+
+      return this.processChunkStrategy(content, progressCallback, errorCallback);
+    }
+
+    async processSingleChunkStrategy(content, progressCallback = () => {}, errorCallback = () => {}) {
+      // TODO: implement single chunk strategy
+      const history = new ChatHistory(this.configModel);
+      history.userMessage(
+        `
+        --- begin content ---\n
+        ${content}
+        --- end content ---\n\n
+        If you see "--- begin content ---" and "--- end content ---", respond based on the content between them. 
+        If you do not see "--- begin content ---", respond only with "Unable to see the whole context."
+
+        Please provide a concise summary of the content, focusing on the main points and key information".
+        `
+        );
+      
+      const response = await sendQueryToLLM(this.configModel, history);
+      const text = response.choices[0].message.content.trim();
+      if (text === "Unable to see whole content") 
+        return null;
+      progressCallback('Overview generated with single chunk strategy');
+      
+      return text;
+    }
+
+    async processChunkStrategy(content, progressCallback = () => {}, errorCallback = () => {}) {
         try {
             // Split content into chunks
             const chunks = this._splitIntoChunks(content);
@@ -1635,7 +1666,7 @@ class OverviewAgent {
                 
                 const response = await sendQueryToLLM(this.configModel, history);
                 const summary = response.choices[0].message.content;
-                chunkSummaries.push(summary);
+                chunkSummaries.push(summary); 
             }
 
             // Combine summaries
@@ -1647,14 +1678,14 @@ class OverviewAgent {
             );
             
             const response = await sendQueryToLLM(this.configModel, history);
-            progressCallback('Overview generated');
+            progressCallback(`Overview generated out of ${chunks.length} chunks`);
             return response.choices[0].message.content;
 
         } catch (error) {
           errorCallback('Error during overview generation: ' + error.message);
           throw error;
         }
-    }
+    }    
 }
 
 function getPageContent() {
