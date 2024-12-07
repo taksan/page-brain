@@ -101,6 +101,10 @@
             )
           )
       )
+      _$(shadowRoot).qa("input, textarea").forEach(input => {
+        console.log(input);
+        ignoreKeyStrokesWhenInputHasFocus(shadowRoot, input);
+      });      
 
       this.researchModeAlertPrinted = false;
 
@@ -189,9 +193,6 @@
             configTab("Research", createResearchTab(self.configModel))
           )
           .build();
-          _$(self.configPanel).qa("input, textarea").forEach(input => {
-            ignoreKeyStrokesWhenInputHasFocus(shadowRoot, input);
-          });
 
         return self.configPanel;
 
@@ -1601,7 +1602,7 @@ class OverviewAgent {
                     chunk = chunk.substring(0, breakPoint + 1);
                     currentIndex += breakPoint + 1;
                 } else {
-                    currentIndex += chunk.length;
+                    currentIndex += chunk.length - this.options.chunkOverlap;
                 }
             } else {
                 currentIndex = text.length;
@@ -1620,6 +1621,8 @@ class OverviewAgent {
      * @returns {Promise<string>} The generated overview
      */
     async process(content, progressCallback = () => {}, errorCallback = () => {}) {
+      console.log(content);
+      console.log(content.split(" ").length*3/4);
       let overviewResult = this.processSingleChunkStrategy(content, progressCallback, errorCallback);
       if (overviewResult) return overviewResult;
 
@@ -1627,8 +1630,16 @@ class OverviewAgent {
     }
 
     async processSingleChunkStrategy(content, progressCallback = () => {}, errorCallback = () => {}) {
-      // TODO: implement single chunk strategy
       const history = new ChatHistory(this.configModel);
+      let overviewPrompt = `
+        Based on the overview provided above, structure the information as follows:
+        - Add a short introduction about the general subject of the page
+        - Create an outline of the main topics, similar to a table of contents
+        - Explore the main topics shortly as bullet points with a short explanation of each topic
+        - If a topic is about an external story, include a link to the story, use markdown links
+        - When creating outlines, don't add empty topics and don't add duplicate topics
+        - Ignore content that is part of structure and navigation, such as headers, menus, footers, etc.
+      `;
       history.userMessage(
         `
         --- begin content ---\n
@@ -1637,14 +1648,17 @@ class OverviewAgent {
         If you see "--- begin content ---" and "--- end content ---", respond based on the content between them. 
         If you do not see "--- begin content ---", respond only with "Unable to see the whole context."
 
-        Please provide a concise summary of the content, focusing on the main points and key information".
+        ${overviewPrompt}".
         `
         );
+
+      progressCallback('Will try to generate overview with single chunk strategy');
       
       const response = await sendQueryToLLM(this.configModel, history);
       const text = response.choices[0].message.content.trim();
-      if (text === "Unable to see whole content") 
+      if (text.includes("Unable to see whole content")) 
         return null;
+
       progressCallback('Overview generated with single chunk strategy');
       
       return text;
@@ -1894,43 +1908,43 @@ function getPageContentAsMarkdown() {
 
 
 function getPageContentNaive() {
-  const article = document.querySelector("article");
-  if (article) {
-    return article.innerText;
-  }
-
-  // If no article tag is found, try to get content from the main tag
-  const main = document.querySelector("main");
-  if (main) {
-    return main.innerText;
-  }
-
-  // If no main tag is found, try to get content from the body tag
-  // but exclude certain elements that typically don't contain main content
-  const body = document.body;
-  const elementsToExclude = [
-    "header",
-    "footer",
-    "nav",
-    "script",
-    "style",
-    "iframe",
-    "noscript",
-  ];
-
-  // Create a temporary div to hold the body content
+  // Create a temporary div to hold the page content
   const tempDiv = document.createElement("div");
-  tempDiv.innerHTML = body.innerHTML;
+  tempDiv.innerHTML = document.body.innerHTML;
 
-  // Remove excluded elements
-  elementsToExclude.forEach((tag) => {
-    const elements = tempDiv.getElementsByTagName(tag);
-    for (let i = elements.length - 1; i >= 0; i--) {
-      elements[i].parentNode.removeChild(elements[i]);
+  // Remove all script and style tags
+  const scriptsAndStyles = tempDiv.querySelectorAll("script, style");
+  scriptsAndStyles.forEach((element) => element.remove());
+
+  // Function to process a node and its children
+  function processNode(node) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      // If it's a link, preserve it
+      if (node.tagName === "A" && node.href) {
+        return `[${node.textContent}](${node.href}) `;
+      }
+      if (node.tagName.startsWith("H")) {
+        let level = parseInt(node.tagName.slice(1));
+        return "#".repeat(level*2) + node.textContent + "\n";
+      }
+      if (node.tagName === "B") {
+        return "**" + processNode(node.childNodes) + "**\n";
+      }
+
+      // For other elements, process their children
+      let text = "";
+      for (let child of node.childNodes) {
+        text += processNode(child);
+      }
+      return text;
+    } else if (node.nodeType === Node.TEXT_NODE) {
+      // Return text content for text nodes
+      return node.textContent;
     }
-  });
+    return "";
+  }
 
-  return tempDiv.innerText;
+  return processNode(tempDiv);
 }
 
 async function sendQueryToLLM(configModel, messageHistory) {
